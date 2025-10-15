@@ -1,7 +1,5 @@
 """
-Created on 09/25/2025
-
-@author: mason mandernach
+Controls Red Pitaya
 """
 
 from pyrpl import Pyrpl
@@ -175,4 +173,5 @@ if __name__ == '__main__':
     }
 
     rp.run(run_params, save_file=False)
+
 
