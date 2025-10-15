@@ -1,0 +1,153 @@
+"""
+Hybrid EIS: Rodeostat + Red Pitaya
+----------------------------------
+- Rodeostat sets DC bias (E_dc)
+- Red Pitaya adds small AC perturbation + lock-in detection
+
+Dominic Morris, 2025
+"""
+
+import serial, time, csv, os
+import numpy as np
+from matplotlib import pyplot as plt
+from pyrpl import Pyrpl
+
+
+# ================================================================
+# Rodeostat controller
+# ================================================================
+class RodeostatController(object):
+    def __init__(self, port='/dev/ttyACM0', baud=230400):
+        self.ser = serial.Serial(port, baud, timeout=1)
+        time.sleep(2)
+        print("Connected to Rodeostat on %s" % port)
+
+    def set_dc_bias(self, voltage):
+        """Send DC bias command (in volts)"""
+        cmd = 'set_bias %.4f\n' % voltage
+        self.ser.write(cmd.encode())
+        time.sleep(0.2)
+
+    def get_current(self):
+        """Query current (A) if Rodeostat supports it"""
+        self.ser.write('get_current\n'.encode())
+        val = self.ser.readline().decode().strip()
+        try:
+            return float(val)
+        except:
+            return None
+
+    def close(self):
+        self.ser.close()
+
+
+# ================================================================
+# Red Pitaya lock-in + AC generator
+# ================================================================
+class RedPitayaEIS(object):
+    def __init__(self, hostname='169.254.131.37', output_dir='eis_data'):
+        self.rp = Pyrpl(config='lockin_config', hostname=hostname)
+        self.rp_modules = self.rp.rp
+        self.asg = self.rp_modules.asg0
+        self.lockin = self.rp_modules.iq2
+        self.scope = self.rp_modules.scope
+        self.scope.decimation = 8192
+        self.scope._start_acquisition_rolling_mode()
+        self.scope.average = 'true'
+        self.sample_rate = 125e6 / self.scope.decimation
+
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        self.output_dir = output_dir
+
+    def configure_ac(self, freq, ac_amp):
+        """Set AC sinewave to inject on Rodeostat bias line"""
+        self.asg.setup(waveform='sin',
+                       frequency=freq,
+                       amplitude=ac_amp,
+                       offset=0.0,
+                       output_direct='out1',
+                       trigger_source='immediately')
+
+    def configure_lockin(self, ref_freq, ref_amp=0.5):
+        self.lockin.setup(frequency=ref_freq,
+                          bandwidth=[-ref_freq * 2, -ref_freq, ref_freq, ref_freq * 2],
+                          gain=1.0,
+                          phase=0,
+                          acbandwidth=0,
+                          amplitude=ref_amp,
+                          input='in1',
+                          output_direct='out2',
+                          output_signal='quadrature',
+                          quadrature_factor=20)
+
+    def capture_xy(self):
+        self.scope.input1 = 'iq2'
+        self.scope.single()
+        x = np.mean(np.array(self.scope._data_ch1_current))
+        y = np.mean(np.array(self.scope._data_ch2_current))
+        return x, y
+
+    def sweep(self, freqs, ac_amp, settle_time=0.2):
+        results = []
+        for f in freqs:
+            print("  f = %.2f Hz" % f)
+            self.configure_ac(f, ac_amp)
+            self.configure_lockin(f)
+            time.sleep(settle_time)
+            X, Y = self.capture_xy()
+            mag = np.sqrt(X**2 + Y**2)
+            phase = np.degrees(np.arctan2(Y, X))
+            results.append((f, X, Y, mag, phase))
+        return results
+
+
+# ================================================================
+# EIS routine: orchestrate both instruments
+# ================================================================
+def run_hybrid_eis(dc_bias=0.1, ac_amp=0.01,
+                   freq_start=1e3, freq_stop=1, points=10,
+                   rodeo_port='/dev/ttyACM0'):
+    freqs = np.logspace(np.log10(freq_start), np.log10(freq_stop), points)
+
+    rodeo = RodeostatController(rodeo_port)
+    rp = RedPitayaEIS()
+
+    print("Setting Rodeostat bias = %.3f V" % dc_bias)
+    rodeo.set_dc_bias(dc_bias)
+    time.sleep(1)
+
+    data = rp.sweep(freqs, ac_amp)
+
+    # Optional: record DC current
+    I_dc = rodeo.get_current()
+    print("Measured DC current: %s A" % I_dc)
+
+    rodeo.close()
+
+    # Save results
+    path = os.path.join(rp.output_dir, 'hybrid_eis.csv')
+    with open(path, 'w') as f:
+        w = csv.writer(f)
+        w.writerow(['Freq_Hz', 'X', 'Y', '|Z|', 'Phase_deg'])
+        for r in data:
+            w.writerow(r)
+    print("Saved %s" % path)
+
+    # Plot Nyquist
+    X = [r[1] for r in data]
+    Y = [r[2] for r in data]
+    plt.figure()
+    plt.plot(X, -np.array(Y), 'o-')
+    plt.xlabel('Re(Z)')
+    plt.ylabel('-Im(Z)')
+    plt.title('Nyquist Plot')
+    plt.grid(True)
+    plt.show()
+
+
+# ================================================================
+if __name__ == '__main__':
+    run_hybrid_eis(dc_bias=0.1, ac_amp=0.01,
+                   freq_start=1000, freq_stop=1, points=10,
+                   rodeo_port='COM3')   # adjust COM port for your Rodeostat
