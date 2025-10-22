@@ -6,8 +6,7 @@ PYTHON VERSION: 3.8 (Required for PyRpl)
 
 PIP INSTALL COMMANDS:
 pip install --upgrade pip setuptools wheel
-pip install PyQt5==5.15.7 pyqtgraph==0.12.4 quamash==0.6.0 pyrpl
-pip install potentiostat pyserial matplotlib numpy pandas scipy h5py
+pip install bcrypt==5.0.0 cffi==1.17.1 contourpy==1.1.1 cryptography==46.0.3 cycler==0.12.1 fonttools==4.57.0 futures==3.0.5 h5py==3.11.0 importlib_resources==6.4.5 kiwisolver==1.4.7 matplotlib==3.7.5 nose==1.3.7 numpy==1.23.5 packaging==25.0 pandas==2.0.3 paramiko==3.5.1 pillow==10.4.0 potentiostat==0.0.4 progressbar2==4.5.0 pycparser==2.23 PyNaCl==1.6.0 pyparsing==3.1.4 PyQt5==5.15.7 PyQt5-Qt5==5.15.2 PyQt5_sip==12.15.0 pyqtgraph==0.12.4 pyrpl==0.9.3.6 pyserial==3.5 python-dateutil==2.9.0.post0 python-utils==3.8.2 pytz==2025.2 PyYAML==6.0.3 qasync==0.28.0 QtPy==2.4.3 Quamash==0.6.1 scipy==1.10.1 scp==0.15.0 six==1.17.0 typing_extensions==4.13.2 tzdata==2025.2 zipp==3.20.2
 
 SETUP:
 1. Connect Rodeostat via USB
@@ -26,7 +25,7 @@ SYSTEM ARCHITECTURE:
 # =============================================================================
 
 # Red Pitaya Configuration
-RED_PITAYA_IP = '169.254.131.37'  # Your Red Pitaya IP
+RED_PITAYA_IP = 'rp-f073ce.local'  # Your Red Pitaya IP
 RED_PITAYA_OUTPUT_DIR = 'eis_data'
 
 # Rodeostat Configuration
@@ -63,6 +62,22 @@ SAVE_DATA = True
 # =============================================================================
 # END CONFIGURATION - DO NOT MODIFY CODE BELOW THIS LINE
 # =============================================================================
+
+import sys
+from qtpy import QtCore
+
+# Monkeypatch QtCore to add pyqtBoundSignal attribute if missing
+if not hasattr(QtCore, 'pyqtBoundSignal'):
+    try:
+        # Attempt to get pyqtBoundSignal from PyQt5.QtCore
+        from PyQt5.QtCore import QObject
+        QtCore.pyqtBoundSignal = type(QObject().destroyed)  # A real Qt signal type
+    except ImportError:
+        # Fallback: create dummy type to avoid error (not ideal but stops crash)
+        class DummySignalType:
+            pass
+        QtCore.pyqtBoundSignal = DummySignalType
+
 
 from potentiostat import Potentiostat
 import serial.tools.list_ports
@@ -276,6 +291,7 @@ class RodeostatController:
             print("Rodeostat not connected")
             return False
         print(f"Setting DC voltage to {voltage} V")
+        # Implement the actual command to set DC voltage here if supported
         return True
 
     def disconnect(self):
@@ -347,101 +363,70 @@ class CombinedEISSystem:
     def frequency_sweep(self, frequencies, dc_bias=0.0, ac_amplitude=0.01, settling_time=1.0):
         if not self.connected:
             print("System not connected")
-            return False
+            return []
 
-        print(f"\nStarting EIS Frequency Sweep ({len(frequencies)} points)")
-        self.eis_data = []
+        results = []
+        for freq in frequencies:
+            res = self.measure_impedance(freq, dc_bias, ac_amplitude, settling_time)
+            if res:
+                results.append(res)
+        self.eis_data = results
+        return results
 
-        for i, freq in enumerate(frequencies):
-            print(f"Measuring {i + 1}/{len(frequencies)}: ", end="")
-            result = self.measure_impedance(freq, dc_bias, ac_amplitude, settling_time)
-            if result:
-                self.eis_data.append(result)
-            else:
-                print(f"Skipping {freq} Hz due to measurement failure")
-
-        print(f"\n✓ Frequency sweep completed! ({len(self.eis_data)} successful measurements)")
-        return len(self.eis_data) > 0
-
-    def plot_eis_results(self, save_file=None):
-        if not self.eis_data:
-            print("No EIS data to plot")
-            return
-        df = pd.DataFrame(self.eis_data)
-        plt.figure(1, figsize=(15, 10))
-
-        plt.subplot(221)
-        plt.plot(df['Z_real'], -df['Z_imag'], 'bo-', markersize=6)
-        plt.xlabel('Z\' (Real)')
-        plt.ylabel('-Z\'\' (Imaginary)')
-        plt.title('Nyquist Plot')
-        plt.grid(True)
-
-        plt.subplot(222)
-        plt.loglog(df['frequency'], df['Z_magnitude'], 'ro-', markersize=6)
-        plt.xlabel('Frequency (Hz)')
-        plt.ylabel('|Z| (Ω)')
-        plt.title('Bode Plot - Magnitude')
-        plt.grid(True)
-
-        plt.subplot(223)
-        plt.semilogx(df['frequency'], df['Z_phase'], 'go-', markersize=6)
-        plt.xlabel('Frequency (Hz)')
-        plt.ylabel('Phase (degrees)')
-        plt.title('Bode Plot - Phase')
-        plt.grid(True)
-
-        plt.subplot(224)
-        plt.semilogx(df['frequency'], df['Z_real'], 'bo-', markersize=4, label='Real')
-        plt.semilogx(df['frequency'], df['Z_imag'], 'ro-', markersize=4, label='Imaginary')
-        plt.xlabel('Frequency (Hz)')
-        plt.ylabel('Impedance (Ω)')
-        plt.title('Real and Imaginary Components')
-        plt.legend()
-        plt.grid(True)
-
-        plt.tight_layout()
-        if save_file:
-            if not os.path.exists(self.output_dir):
-                os.makedirs(self.output_dir)
-            filepath = os.path.join(self.output_dir, save_file)
-            plt.savefig(filepath, dpi=300, bbox_inches='tight')
-            print(f"Plot saved as {filepath}")
-
-        plt.show()
-
-    def save_data(self, filename=None):
+    def save_data_csv(self, filename=None):
         if not self.eis_data:
             print("No data to save")
-            return
+            return False
+
         if filename is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"eis_data_{timestamp}.csv"
+            filename = f'eis_data_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
-        filepath = os.path.join(self.output_dir, filename)
-        with open(filepath, 'w', newline='') as csvfile:
-            fieldnames = ['frequency', 'dc_bias', 'ac_amplitude', 'Z_real', 'Z_imag', 'Z_magnitude',
-                          'Z_phase', 'X', 'Y']
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            for data in self.eis_data:
-                writer.writerow(data)
-        print(f"Data saved to {filepath}")
 
-    def run_original_redpitaya_test(self, params):
-        if not self.connected or not self.redpitaya:
-            print("Red Pitaya not connected")
+        filepath = os.path.join(self.output_dir, filename)
+
+        keys = list(self.eis_data[0].keys())
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=keys)
+            writer.writeheader()
+            for row in self.eis_data:
+                writer.writerow(row)
+
+        print(f"Data saved to {filepath}")
+        return True
+
+    def plot_results(self):
+        if not self.eis_data:
+            print("No data to plot")
             return
-        print("Running original Red Pitaya test...")
-        self.redpitaya.run(params, save_file=False, test=True, fft=True)
+
+        frequencies = [d['frequency'] for d in self.eis_data]
+        magnitudes = [d['Z_magnitude'] for d in self.eis_data]
+        phases = [d['Z_phase'] for d in self.eis_data]
+
+        fig, ax1 = plt.subplots()
+        ax1.set_xscale('log')
+        ax1.set_xlabel('Frequency (Hz)')
+        ax1.set_ylabel('|Z| (Ohm)', color='blue')
+        ax1.plot(frequencies, magnitudes, 'b.-')
+        ax1.tick_params(axis='y', labelcolor='blue')
+        ax1.grid(True, which='both', ls='--')
+
+        ax2 = ax1.twinx()
+        ax2.set_ylabel('Phase (degrees)', color='red')
+        ax2.plot(frequencies, phases, 'r.-')
+        ax2.tick_params(axis='y', labelcolor='red')
+
+        plt.title('EIS Measurement Results')
+        plt.show()
 
     def disconnect(self):
         if self.redpitaya:
             try:
-                self.redpitaya.rp.rp.synthesizer.output_direct = False
-                self.redpitaya.rp.rp.synthesizer2.output_direct = False
-            except:
+                self.redpitaya.rp_modules.asg0.output_direct = False
+                self.redpitaya.rp_modules.asg1.output_direct = False
+            except Exception:
                 pass
         if self.rodeostat:
             self.rodeostat.disconnect()
@@ -449,50 +434,33 @@ class CombinedEISSystem:
 
 
 def main():
-    print("Combined EIS System: Rodeostat + Red Pitaya")
-    print("=" * 60)
-    eis = CombinedEISSystem(redpitaya_ip=RED_PITAYA_IP, output_dir=OUTPUT_DIR)
-
-    if not eis.connect_all():
-        print("Failed to connect to devices")
+    system = CombinedEISSystem(redpitaya_ip=RED_PITAYA_IP, output_dir=OUTPUT_DIR)
+    if not system.connect_all():
+        print("Failed to connect all devices. Exiting.")
         return
 
-    try:
-        # Test original Red Pitaya functionality first
-        print("\nTesting original Red Pitaya functionality...")
-        eis.run_original_redpitaya_test(RED_PITAYA_TEST)
+    start_freq = EIS_FREQUENCIES['start_freq']
+    end_freq = EIS_FREQUENCIES['end_freq']
+    num_points = EIS_FREQUENCIES['num_points']
 
-        # Run EIS measurement using configuration parameters
-        print("\nStarting EIS measurement...")
-        frequencies = np.logspace(
-            np.log10(EIS_FREQUENCIES['start_freq']),
-            np.log10(EIS_FREQUENCIES['end_freq']),
-            EIS_FREQUENCIES['num_points']
-        )
+    frequencies = np.logspace(np.log10(start_freq), np.log10(end_freq), num_points)
 
-        success = eis.frequency_sweep(
-            frequencies=frequencies,
-            dc_bias=EIS_MEASUREMENT['dc_bias'],
-            ac_amplitude=EIS_MEASUREMENT['ac_amplitude'],
-            settling_time=EIS_MEASUREMENT['settling_time']
-        )
+    dc_bias = EIS_MEASUREMENT['dc_bias']
+    ac_amplitude = EIS_MEASUREMENT['ac_amplitude']
+    settling_time = EIS_MEASUREMENT['settling_time']
 
-        if success:
-            if SAVE_DATA:
-                eis.save_data()
-            if SAVE_PLOTS:
-                eis.plot_eis_results("eis_results.png")
-            print("\n✓ EIS measurement completed successfully!")
-        else:
-            print("EIS measurement failed!")
+    print(f"Starting frequency sweep from {start_freq} Hz to {end_freq} Hz ({num_points} points)")
 
-    except KeyboardInterrupt:
-        print("\nMeasurement interrupted by user")
-    finally:
-        eis.disconnect()
+    results = system.frequency_sweep(frequencies, dc_bias=dc_bias, ac_amplitude=ac_amplitude, settling_time=settling_time)
+
+    if results:
+        system.save_data_csv()
+        system.plot_results()
+
+    system.disconnect()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
 
 
