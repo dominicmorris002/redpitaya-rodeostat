@@ -19,7 +19,7 @@ import traceback
 ports = serial.tools.list_ports.comports()
 if not ports:
     raise SystemExit("No serial ports found. Connect your Rodeostat and try again.")
-port = ports[0].device
+port = ports[1].device
 print("Connecting to Rodeostat on", port)
 
 datafile = 'data.txt'  # File to save time, voltage, and current data
