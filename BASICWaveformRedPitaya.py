@@ -1,14 +1,11 @@
 """
-Simple Red Pitaya Control
-=========================
+Simple Red Pitaya Control - Fixed Version
+=========================================
 
-Basic Red Pitaya control for:
-- AC wave generation
-- Input/output measurement
-- Phase measurement
-- Timestamps and data logging
-
-No lock-in amplifier - just basic oscilloscope measurements
+Basic Red Pitaya control without configuration files
+- Direct connection without PyRPL config
+- Fixed freezing issue
+- Simple AC generation and measurement
 """
 
 import numpy as np
@@ -17,6 +14,7 @@ import time
 from datetime import datetime
 import csv
 import os
+import socket
 
 # Red Pitaya configuration
 RED_PITAYA_IP = 'rp-f073ce.local'  # Change this to your Red Pitaya IP
@@ -30,16 +28,43 @@ class SimpleRedPitaya:
         self.data = []
         
     def connect(self):
-        """Connect to Red Pitaya"""
+        """Connect to Red Pitaya without configuration file"""
         try:
             from pyrpl import Pyrpl
             print(f"Connecting to Red Pitaya at {self.ip}...")
-            self.rp = Pyrpl(hostname=self.ip)
+            
+            # Connect without config file to avoid the configuration window
+            self.rp = Pyrpl(hostname=self.ip, config=None)
             self.connected = True
             print("✓ Connected to Red Pitaya")
             return True
         except Exception as e:
             print(f"❌ Connection failed: {e}")
+            print("Trying alternative connection method...")
+            return self.connect_alternative()
+    
+    def connect_alternative(self):
+        """Alternative connection method using direct socket"""
+        try:
+            # Test if Red Pitaya is reachable
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((self.ip, 22))  # SSH port
+            sock.close()
+            
+            if result == 0:
+                print("✓ Red Pitaya is reachable")
+                # Try to connect with minimal config
+                from pyrpl import Pyrpl
+                self.rp = Pyrpl(hostname=self.ip, config={})
+                self.connected = True
+                print("✓ Connected to Red Pitaya (alternative method)")
+                return True
+            else:
+                print("❌ Red Pitaya not reachable")
+                return False
+        except Exception as e:
+            print(f"❌ Alternative connection failed: {e}")
             return False
     
     def setup_scope(self):
@@ -49,13 +74,12 @@ class SimpleRedPitaya:
             return False
         
         try:
-            # Configure oscilloscope
-            self.rp.rp.scope.input1 = 'in1'  # Input 1
-            self.rp.rp.scope.input2 = 'in2'  # Input 2
-            self.rp.rp.scope.decimation = 1  # Maximum resolution
-            self.rp.rp.scope.average = False
-            self.rp.rp.scope.trigger_source = 'ch1_positive_edge'
-            self.rp.rp.scope.trigger_level = 0.1
+            # Configure oscilloscope with minimal settings
+            scope = self.rp.rp.scope
+            scope.input1 = 'in1'
+            scope.input2 = 'in2'
+            scope.decimation = 1
+            scope.average = False
             print("✓ Oscilloscope configured")
             return True
         except Exception as e:
@@ -69,8 +93,9 @@ class SimpleRedPitaya:
             return False
         
         try:
-            # Use ASG (Arbitrary Signal Generator) for AC wave
-            self.rp.rp.asg0.setup(
+            # Use ASG for AC wave generation
+            asg = self.rp.rp.asg0
+            asg.setup(
                 frequency=frequency,
                 amplitude=amplitude,
                 phase=phase,
@@ -100,15 +125,31 @@ class SimpleRedPitaya:
         
         try:
             # Configure scope for capture
-            self.rp.rp.scope.duration = duration
-            self.rp.rp.scope.single()
+            scope = self.rp.rp.scope
+            scope.duration = duration
+            scope.single()
             
-            # Wait for acquisition
-            time.sleep(duration + 0.1)
+            # Wait for acquisition with timeout
+            max_wait = duration + 1.0
+            start_wait = time.time()
+            
+            while time.time() - start_wait < max_wait:
+                try:
+                    # Check if data is ready
+                    if hasattr(scope, '_data_ch1_current') and scope._data_ch1_current:
+                        break
+                except:
+                    pass
+                time.sleep(0.01)
             
             # Get waveform data
-            ch1_data = np.array(self.rp.rp.scope._data_ch1_current)
-            ch2_data = np.array(self.rp.rp.scope._data_ch2_current)
+            ch1_data = np.array(scope._data_ch1_current)
+            ch2_data = np.array(scope._data_ch2_current)
+            
+            if len(ch1_data) == 0 or len(ch2_data) == 0:
+                print("⚠ No data captured")
+                return None
+            
             time_data = np.linspace(0, duration, len(ch1_data))
             
             # Calculate measurements
@@ -122,18 +163,19 @@ class SimpleRedPitaya:
             ch1_pp = np.max(ch1_data) - np.min(ch1_data)
             ch2_pp = np.max(ch2_data) - np.min(ch2_data)
             
-            # Phase calculation (simple cross-correlation method)
-            if len(ch1_data) > 0 and len(ch2_data) > 0:
-                # Normalize signals
-                ch1_norm = ch1_data / np.max(np.abs(ch1_data)) if np.max(np.abs(ch1_data)) > 0 else ch1_data
-                ch2_norm = ch2_data / np.max(np.abs(ch2_data)) if np.max(np.abs(ch2_data)) > 0 else ch2_data
+            # Simple phase calculation
+            if len(ch1_data) > 10 and len(ch2_data) > 10:
+                # Find zero crossings for phase calculation
+                ch1_zeros = np.where(np.diff(np.sign(ch1_data)))[0]
+                ch2_zeros = np.where(np.diff(np.sign(ch2_data)))[0]
                 
-                # Calculate phase difference
-                correlation = np.correlate(ch1_norm, ch2_norm, mode='full')
-                max_corr_idx = np.argmax(correlation)
-                phase_samples = max_corr_idx - len(ch1_data) + 1
-                phase_rad = 2 * np.pi * phase_samples / len(ch1_data)
-                phase_deg = np.degrees(phase_rad)
+                if len(ch1_zeros) > 0 and len(ch2_zeros) > 0:
+                    # Calculate phase difference
+                    phase_samples = ch2_zeros[0] - ch1_zeros[0] if len(ch2_zeros) > 0 else 0
+                    phase_rad = 2 * np.pi * phase_samples / len(ch1_data)
+                    phase_deg = np.degrees(phase_rad)
+                else:
+                    phase_deg = 0
             else:
                 phase_deg = 0
             
@@ -157,8 +199,8 @@ class SimpleRedPitaya:
             print(f"❌ Measurement failed: {e}")
             return None
     
-    def run_continuous_measurement(self, frequency, amplitude, duration=10, sample_interval=0.1):
-        """Run continuous measurements"""
+    def run_continuous_measurement(self, frequency, amplitude, duration=10, sample_interval=0.5):
+        """Run continuous measurements with better error handling"""
         print(f"Starting continuous measurement for {duration} seconds...")
         print(f"AC Wave: {frequency} Hz, {amplitude} V")
         print(f"Sample interval: {sample_interval} s")
@@ -170,27 +212,43 @@ class SimpleRedPitaya:
         try:
             start_time = time.time()
             measurement_count = 0
+            last_measurement_time = 0
             
             while time.time() - start_time < duration:
-                # Capture measurement
-                measurement = self.capture_measurement(0.1)
+                current_time = time.time()
                 
-                if measurement:
-                    self.data.append(measurement)
-                    measurement_count += 1
+                # Check if it's time for next measurement
+                if current_time - last_measurement_time >= sample_interval:
+                    print(f"Taking measurement {measurement_count + 1}...")
                     
-                    # Print current status
-                    print(f"Measurement {measurement_count}: "
-                          f"CH1 RMS={measurement['ch1_rms']:.4f}V, "
-                          f"CH2 RMS={measurement['ch2_rms']:.4f}V, "
-                          f"Phase={measurement['phase_deg']:.1f}°")
+                    # Capture measurement
+                    measurement = self.capture_measurement(0.1)
+                    
+                    if measurement:
+                        self.data.append(measurement)
+                        measurement_count += 1
+                        
+                        # Print current status
+                        print(f"  CH1 RMS={measurement['ch1_rms']:.4f}V, "
+                              f"CH2 RMS={measurement['ch2_rms']:.4f}V, "
+                              f"Phase={measurement['phase_deg']:.1f}°")
+                    else:
+                        print("  ⚠ Measurement failed, retrying...")
+                    
+                    last_measurement_time = current_time
                 
-                # Wait for next sample
-                time.sleep(sample_interval)
+                # Small sleep to prevent busy waiting
+                time.sleep(0.1)
             
             print(f"✓ Completed {measurement_count} measurements")
             return True
             
+        except KeyboardInterrupt:
+            print("\n⚠ Measurement interrupted by user.")
+            return False
+        except Exception as e:
+            print(f"❌ Measurement error: {e}")
+            return False
         finally:
             # Stop AC wave
             self.stop_ac_wave()
@@ -285,8 +343,8 @@ class SimpleRedPitaya:
 
 def main():
     """Main function"""
-    print("Simple Red Pitaya Control")
-    print("=" * 30)
+    print("Simple Red Pitaya Control - Fixed Version")
+    print("=" * 40)
     
     # Create Red Pitaya instance
     rp = SimpleRedPitaya(RED_PITAYA_IP)
@@ -306,7 +364,7 @@ def main():
         frequency = 1000  # Hz
         amplitude = 0.1   # V
         duration = 10     # seconds
-        sample_interval = 0.5  # seconds
+        sample_interval = 1.0  # seconds (increased to prevent freezing)
         
         print(f"\nConfiguration:")
         print(f"  Frequency: {frequency} Hz")
