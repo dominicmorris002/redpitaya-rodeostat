@@ -9,15 +9,14 @@ scope:
   input2: out1
   threshold: 0.0
   hysteresis: 0.0
-  duration: 1.073741824
+  duration: 0.016777216
   trigger_delay: 0.0
   trigger_source: ch1_positive_edge
-  trigger_mode: normal
-  average: true
-  decimation: 8192
+  trigger_mode: auto
+  average: false
+  decimation: 128
   curve_name: scope curve
   running_state: running_continuous
-  rolling_mode: true
 asg0:
   waveform: sin
   frequency: 1000.00761449337
@@ -26,6 +25,15 @@ asg0:
   output_direct: out1
   trigger_source: immediately
 pyrpl:
+  gui: true
+  loglevel: info
+  modules:
+  - NetworkAnalyzer
+  - SpectrumAnalyzer
+  - CurveViewer
+  - PyrplConfig
+  - Lockbox
+  name: scope_config
   background_color: ''
   dock_positions: "\0\0\0\xFF\0\0\0\0\xFD\0\0\0\x01\0\0\0\x02\0\0\x03 \0\0\x02/\xFC\
     \x01\0\0\0\x01\xFC\0\0\0\0\0\0\x03 \0\0\0]\0\xFF\xFF\xFF\xFA\0\0\0\x03\x01\0\0\
@@ -49,15 +57,6 @@ pyrpl:
     (\0s\0c\0o\0p\0e\0_\0c\0o\0n\0f\0i\0g\0)\0\0\0\0\0\xFF\xFF\xFF\xFF\0\0\0\x16\0\
     \xFF\xFF\xFF\0\0\x01\xEA\0\0\0\0\0\0\0\x04\0\0\0\x04\0\0\0\b\0\0\0\b\xFC\0\0\0\
     \0"
-  gui: true
-  loglevel: info
-  modules:
-  - NetworkAnalyzer
-  - SpectrumAnalyzer
-  - CurveViewer
-  - PyrplConfig
-  - Lockbox
-  name: scope_config
   window_position:
   - 0
   - 0
@@ -67,7 +66,7 @@ redpitaya:
   autostart: true
   delay: 0.05
   frequency_correction: 1.0
-  hostname: _FAKE_
+  hostname: rp-f073ce.local
   leds_off: true
   monitor_server_name: monitor_server
   password: root
