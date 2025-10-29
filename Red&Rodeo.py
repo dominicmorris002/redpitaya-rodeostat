@@ -41,17 +41,11 @@ class RedPitayaScope:
         self.output_dir = output_dir
         self.yaml_file = yaml_file
 
-        # Ensure YAML exists
         self.create_yaml()
-
-        # Connect to RedPitaya
         self.rp = Pyrpl(config=self.yaml_file)
-
-        # Access modules
         self.scope = self.rp.rp.scope
         self.asg = self.rp.rp.asg0
 
-        # Scope setup
         self.scope.input1 = 'in1'
         self.scope.input2 = 'out1'
         self.scope.decimation = 128
@@ -59,7 +53,6 @@ class RedPitayaScope:
         self.scope.trigger_mode = 'auto'
         self.sample_rate = 125e6 / self.scope.decimation
 
-        # Default output waveform
         self.test_freq = RP_FREQ
         self.test_amp = RP_AMP
         self.test_offset = RP_OFFSET
@@ -131,49 +124,8 @@ class RedPitayaScope:
         print("⚠️ Acquisition timed out")
         return None, None
 
-    def plot_time(self, ch_in, ch_out, save_file=RP_SAVE_FILE, filename='scope_time.png', time_window=RP_TIME_WINDOW):
-        t = np.arange(len(ch_in)) / self.sample_rate
-        if time_window:
-            max_samples = int(time_window * self.sample_rate)
-            t = t[:max_samples]
-            ch_in = ch_in[:max_samples]
-            ch_out = ch_out[:max_samples]
-
-        # Phase calculation
-        N = len(ch_in)
-        fft_in = np.fft.rfft(ch_in * np.hanning(N))
-        fft_out = np.fft.rfft(ch_out * np.hanning(N))
-        peak_idx = np.argmax(np.abs(fft_in))
-        phase_diff_rad = np.angle(fft_out[peak_idx]) - np.angle(fft_in[peak_idx])
-        phase_diff_deg = np.degrees(phase_diff_rad)
-
-        plt.figure(figsize=(10, 4))
-        plt.plot(t, ch_in, label='AC Input (IN1)', color='tab:blue')
-        plt.plot(t, ch_out, label='AC Output (OUT1)', color='tab:orange')
-        plt.xlabel('Time (s)')
-        plt.ylabel('Voltage (V)')
-        plt.title(f'RedPitaya Scope Capture — Phase: {phase_diff_deg:.1f}°')
-        plt.grid(True)
-        plt.legend()
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
-        if save_file:
-            os.makedirs(self.output_dir, exist_ok=True)
-            plt.savefig(os.path.join(self.output_dir, filename))
-        else:
-            plt.show()
-
-    def run(self, show_fft=RP_SHOW_FFT, save_file=RP_SAVE_FILE, freq=None, amp=None, offset=None, time_window=RP_TIME_WINDOW):
-        if freq or amp or offset:
-            self.setup_output(freq=freq, amp=amp, offset=offset)
-        ch_in, ch_out = self.capture()
-        if ch_in is None or ch_out is None:
-            print("⚠️ No data captured")
-            return
-        if show_fft:
-            # Optional FFT plot
-            pass
-        else:
-            self.plot_time(ch_in, ch_out, save_file=save_file, time_window=time_window)
+    def run(self):
+        return self.capture()
 
 # ================== RODEOSTAT SETUP ==================
 def setup_rodeostat():
@@ -185,14 +137,12 @@ def setup_rodeostat():
     for i, p in enumerate(ports):
         print(f"{i}: {p.device} - {p.description}")
 
-    # Auto-select specified COM port
     choice = next((i for i, p in enumerate(ports) if p.device.upper() == RODEO_COM.upper()), None)
     if choice is None:
         raise SystemExit(f"{RODEO_COM} not found. Connect Rodeostat.")
     port = ports[choice].device
     print("Using port:", port)
 
-    # Configure waveform parameters
     if RODEO_MODE.upper() == 'CV':
         volt_min = RODEO_VOLT_MIN
         volt_max = RODEO_VOLT_MAX
@@ -243,7 +193,6 @@ def setup_rodeostat():
 # ================== RUN COMBINED TEST ==================
 def run_combined():
     rodeostat, MODE = setup_rodeostat()
-
     rp_scope = RedPitayaScope()
     rp_scope.setup_output(freq=RP_FREQ, amp=RP_AMP, offset=RP_OFFSET)
 
@@ -256,37 +205,63 @@ def run_combined():
         return
 
     print("Rodeostat measurement complete. Capturing RedPitaya AC signals...")
-
-    ch_in, ch_out = rp_scope.capture()
+    ch_in, ch_out = rp_scope.run()
     if ch_in is None or ch_out is None:
         print("⚠️ No RedPitaya data captured")
         return
 
-    # Rodeostat plots
-    plt.figure(1)
-    plt.subplot(211)
-    plt.plot(t, volt, label='DC Voltage (Rodeostat)')
-    plt.ylabel('Voltage (V)')
-    plt.grid(True)
-    plt.subplot(212)
-    plt.plot(t, curr, label='DC Current (Rodeostat)')
-    plt.ylabel('Current (uA)')
-    plt.xlabel('Time (s)')
-    plt.grid(True)
+    # ================== PLOT ALL IN ONE FIGURE ==================
+    fig, axs = plt.subplots(3, 2, figsize=(15, 10))
+    fig.suptitle(f'Rodeostat & RedPitaya Combined Measurement', fontsize=16)
 
-    plt.figure(2)
-    plt.plot(volt, curr, label=f'{MODE} Test')
-    plt.xlabel('Voltage (V)')
-    plt.ylabel('Current (uA)')
-    plt.title(f'Rodeostat {MODE} Test')
-    plt.grid(True)
+    # Rodeostat: Voltage vs Time
+    axs[0,0].plot(t, volt, color='tab:blue')
+    axs[0,0].set_ylabel('Voltage (V)')
+    axs[0,0].set_title('Rodeostat Voltage vs Time')
+    axs[0,0].grid(True)
+
+    # Rodeostat: Current vs Time
+    axs[0,1].plot(t, curr, color='tab:orange')
+    axs[0,1].set_ylabel('Current (uA)')
+    axs[0,1].set_title('Rodeostat Current vs Time')
+    axs[0,1].grid(True)
+
+    # Rodeostat: Current vs Voltage
+    axs[1,0].plot(volt, curr, color='tab:green')
+    axs[1,0].set_xlabel('Voltage (V)')
+    axs[1,0].set_ylabel('Current (uA)')
+    axs[1,0].set_title('Rodeostat I-V Curve')
+    axs[1,0].grid(True)
 
     # RedPitaya AC signals
-    rp_scope.plot_time(ch_in, ch_out, save_file=RP_SAVE_FILE, time_window=RP_TIME_WINDOW)
+    N = len(ch_in)
+    fft_in = np.fft.rfft(ch_in * np.hanning(N))
+    fft_out = np.fft.rfft(ch_out * np.hanning(N))
+    peak_idx = np.argmax(np.abs(fft_in))
+    phase_diff_rad = np.angle(fft_out[peak_idx]) - np.angle(fft_in[peak_idx])
+    phase_diff_deg = np.degrees(phase_diff_rad)
 
-    plt.tight_layout()
+    t_rp = np.arange(len(ch_in)) / rp_scope.sample_rate
+    if RP_TIME_WINDOW:
+        max_samples = int(RP_TIME_WINDOW * rp_scope.sample_rate)
+        t_rp = t_rp[:max_samples]
+        ch_in = ch_in[:max_samples]
+        ch_out = ch_out[:max_samples]
+
+    axs[1,1].plot(t_rp, ch_in, label='AC IN1', color='tab:blue')
+    axs[1,1].plot(t_rp, ch_out, label='AC OUT1', color='tab:orange')
+    axs[1,1].set_xlabel('Time (s)')
+    axs[1,1].set_ylabel('Voltage (V)')
+    axs[1,1].set_title(f'RedPitaya AC Signals — Phase: {phase_diff_deg:.1f}°')
+    axs[1,1].legend()
+    axs[1,1].grid(True)
+
+    # Empty placeholders for aesthetics
+    axs[2,0].axis('off')
+    axs[2,1].axis('off')
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.show()
-
 
 if __name__ == '__main__':
     run_combined()
