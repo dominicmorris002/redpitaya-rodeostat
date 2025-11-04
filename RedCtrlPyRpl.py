@@ -78,9 +78,9 @@ class RedPitayaScope:
             }
             with open(self.yaml_file, 'w') as f:
                 yaml.dump(config, f)
-            print(f"✅ Created fixed YAML: {self.yaml_file}")
+            print(f"Created YAML: {self.yaml_file}")
         else:
-            print(f"ℹ️ YAML exists: {self.yaml_file}")
+            print(f"YAML exists: {self.yaml_file}")
 
     def setup_output(self, freq=None, amp=None, offset=None):
         if freq is not None:
@@ -97,11 +97,11 @@ class RedPitayaScope:
             output_direct='out1',
             trigger_source='immediately'
         )
-        print(f"🔊 Output: {self.test_freq} Hz, {self.test_amp} V, Offset: {self.test_offset} V")
+        print(f"Output: {self.test_freq} Hz, {self.test_amp} V, Offset: {self.test_offset} V")
 
-    def capture(self):
-        self.scope.single()
-        timeout = 2.0
+    def capture(self, timeout=1.0):
+        """Capture a single sweep and return IN1 and OUT1 data"""
+        self.scope.single()  # Trigger single acquisition
         dt = 0.01
         elapsed = 0
         while elapsed < timeout:
@@ -111,10 +111,10 @@ class RedPitayaScope:
                 return ch1, ch2
             time.sleep(dt)
             elapsed += dt
-        print("⚠️ Acquisition timed out")
+        print("Acquisition timed out")
         return None, None
 
-    def plot_time(self, ch_in, ch_out, save_file=SAVE_FILE, filename='scope_time.png', time_window=TIME_WINDOW):
+    def plot_time(self, ch_in, ch_out, ax=None, time_window=TIME_WINDOW):
         t = np.arange(len(ch_in)) / self.sample_rate
         if time_window:
             max_samples = int(time_window * self.sample_rate)
@@ -130,57 +130,46 @@ class RedPitayaScope:
         phase_diff_rad = np.angle(fft_out[peak_idx]) - np.angle(fft_in[peak_idx])
         phase_diff_deg = np.degrees(phase_diff_rad)
 
-        plt.figure(figsize=(10, 4))
-        plt.plot(t, ch_in, label='IN1', color='tab:blue')
-        plt.plot(t, ch_out, label='OUT1', color='tab:orange')
-        plt.xlabel('Time (s)')
-        plt.ylabel('Voltage (V)')
-        plt.title(f'RedPitaya Scope Capture — Phase: {phase_diff_deg:.1f}°')
-        plt.grid(True)
-        plt.legend()
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
-        if save_file:
-            os.makedirs(self.output_dir, exist_ok=True)
-            plt.savefig(os.path.join(self.output_dir, filename))
+        if ax is None:
+            plt.figure(figsize=(10, 4))
+            plt.plot(t, ch_in, label='IN1', color='tab:blue')
+            plt.plot(t, ch_out, label='OUT1', color='tab:orange')
+            plt.xlabel('Time (s)')
+            plt.ylabel('Voltage (V)')
+            plt.title(f'RedPitaya Scope Capture — Phase: {phase_diff_deg:.1f}°')
+            plt.grid(True)
+            plt.legend()
+            plt.tight_layout()
+            plt.pause(0.001)
         else:
-            plt.show()
+            ax.clear()
+            ax.plot(t, ch_in, label='IN1', color='tab:blue')
+            ax.plot(t, ch_out, label='OUT1', color='tab:orange')
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel('Voltage (V)')
+            ax.set_title(f'Phase: {phase_diff_deg:.1f}°')
+            ax.grid(True)
+            ax.legend()
+            plt.pause(0.001)
 
-    def plot_fft(self, ch_in, ch_out, save_file=SAVE_FILE, filename='scope_fft.png'):
-        N = len(ch_in)
-        freqs = np.fft.rfftfreq(N, 1 / self.sample_rate)
-        fft_in = np.fft.rfft(ch_in * np.hanning(N))
-        fft_out = np.fft.rfft(ch_out * np.hanning(N))
-        psd_in = (np.abs(fft_in) ** 2) / (self.sample_rate * N)
-        psd_out = (np.abs(fft_out) ** 2) / (self.sample_rate * N)
-        plt.figure(figsize=(10, 4))
-        plt.semilogy(freqs, psd_in, label='IN1', color='tab:blue')
-        plt.semilogy(freqs, psd_out, label='OUT1', color='tab:orange')
-        plt.xlabel('Frequency (Hz)')
-        plt.ylabel('Power (a.u.)')
-        plt.title('RedPitaya Scope FFT')
-        plt.grid(True)
-        plt.legend()
-        plt.tight_layout()
-        if save_file:
-            os.makedirs(self.output_dir, exist_ok=True)
-            plt.savefig(os.path.join(self.output_dir, filename))
-        else:
+    def run_continuous(self, time_window=TIME_WINDOW):
+        """Continuously acquire and plot scope data"""
+        print("Starting continuous capture. Press Ctrl+C to stop.")
+        plt.ion()
+        fig, ax = plt.subplots(figsize=(10, 4))
+        try:
+            while True:
+                ch_in, ch_out = self.capture()
+                if ch_in is None or ch_out is None:
+                    continue
+                self.plot_time(ch_in, ch_out, ax=ax, time_window=time_window)
+        except KeyboardInterrupt:
+            print("Stopped continuous capture")
+            plt.ioff()
             plt.show()
-
-    def run(self, show_fft=SHOW_FFT, save_file=SAVE_FILE, freq=None, amp=None, offset=None, time_window=TIME_WINDOW):
-        if freq or amp or offset:
-            self.setup_output(freq=freq, amp=amp, offset=offset)
-        ch_in, ch_out = self.capture()
-        if ch_in is None or ch_out is None:
-            print("⚠️ No data captured")
-            return
-        if show_fft:
-            self.plot_fft(ch_in, ch_out, save_file=save_file)
-        else:
-            self.plot_time(ch_in, ch_out, save_file=save_file, time_window=time_window)
 
 
 if __name__ == '__main__':
     rp_scope = RedPitayaScope()
     rp_scope.setup_output(freq=WAVEFORM_FREQ, amp=WAVEFORM_AMP, offset=WAVEFORM_OFFSET)
-    rp_scope.run(show_fft=SHOW_FFT, save_file=SAVE_FILE, time_window=TIME_WINDOW)
+    rp_scope.run_continuous(time_window=TIME_WINDOW)
