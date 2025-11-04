@@ -9,53 +9,34 @@ import serial.tools.list_ports
 import traceback
 
 # ============================================================
-# CONFIGURABLE PARAMETERS — WITH SAFE RANGES & NOTES
+# CONFIGURABLE PARAMETERS
 # ============================================================
 
-# ---------- RedPitaya (AC Waveform Generator + Scope) ----------
-RP_HOSTNAME = 'rp-f073ce.local'   # Hostname or IP address of Red Pitaya
+# Red Pitaya (AC Waveform Generator + Scope)
+RP_HOSTNAME = 'rp-f073ce.local'
+RP_OUTPUT_DIR = 'scope_data'
+RP_YAML_FILE = 'scope_config.yml'
 
-RP_OUTPUT_DIR = 'scope_data'      # Directory for intermediate scope data
-RP_YAML_FILE = 'scope_config.yml' # Config file (auto-generated)
+RP_FREQ = 1000
+RP_AMP = 0.5
+RP_OFFSET = 0.0
+RP_TIME_WINDOW = 0.005  # Time window for plotting (s)
+RP_SHOW_FFT = False
+RP_SAVE_FILE = False
 
-RP_FREQ = 1000                    # Frequency [Hz] — Range: 0.01 Hz to ~62.5 MHz
-                                  # Recommended for EIS: 0.1 Hz – 100 kHz
-
-RP_AMP = 0.5                      # Amplitude [V peak-to-peak] — Max ±1 Vpp per channel
-                                  # (use <= 1.0 Vpp to stay within linear region)
-
-RP_OFFSET = 0.0                   # DC offset [V] — Range: ±1 V typical
-                                  # Used to shift waveform above or below 0 V
-
-RP_TIME_WINDOW = 0.005            # Time window [s] for plotted AC trace
-                                  # e.g. 0.001–0.05 s depending on RP_FREQ
-
-RP_SHOW_FFT = False               # Set True to compute FFT (optional)
-RP_SAVE_FILE = False              # Internal RP save (we save combined CSV below)
-
-# ---------- Rodeostat (DC/CV Potentiostat) ----------
-RODEO_COM = 'COM5'                # Serial COM port (auto-detected if matches name)
-
-RODEO_MODE = 'RAMP'               # Mode: 'DC', 'RAMP', or 'CV'
-                                  # DC = fixed voltage
-                                  # RAMP = linear ramp from V_START → V_END
-                                  # CV = cyclic voltammetry loop (min → max → min)
-
-RODEO_CURR_RANGE = '100uA'        # Current range — options: '1uA', '10uA', '100uA', '1000uA'
-
-RODEO_SAMPLE_RATE = 100.0         # Sample rate [Hz] — Range: 1–1000 Hz typical
-                                  # Keep <200 Hz for slow electrochemical reactions
-
-RODEO_QUIET_TIME = 0              # Pre-test quiet time [s]
-RODEO_QUIET_VALUE = 0.0           # Voltage [V] held during quiet time
-
-RODEO_V_START = 0.0               # Start voltage [V] — Range: -1.0 to +1.0 V typical
-RODEO_V_END = 0.5                 # End voltage [V] — Range: -1.0 to +1.0 V typical
-
-RODEO_VOLT_MIN = -0.1             # CV lower limit [V]
-RODEO_VOLT_MAX = 1.0              # CV upper limit [V]
-RODEO_VOLT_PER_SEC = 0.05         # Scan rate [V/s] — Range: 0.001–1.0 V/s typical
-RODEO_NUM_CYCLES = 1              # CV cycles (forward + reverse = 1 cycle)
+# Rodeostat (DC/CV Potentiostat)
+RODEO_COM = 'COM5'
+RODEO_MODE = 'RAMP'
+RODEO_CURR_RANGE = '100uA'
+RODEO_SAMPLE_RATE = 100.0
+RODEO_QUIET_TIME = 0
+RODEO_QUIET_VALUE = 0.0
+RODEO_V_START = 0.0
+RODEO_V_END = 0.5
+RODEO_VOLT_MIN = -0.1
+RODEO_VOLT_MAX = 1.0
+RODEO_VOLT_PER_SEC = 0.05
+RODEO_NUM_CYCLES = 1
 
 # ============================================================
 # RED PITAYA CLASS
@@ -73,8 +54,7 @@ class RedPitayaScope:
         # Scope configuration
         self.scope.input1 = 'in1'
         self.scope.input2 = 'out1'
-        self.scope.decimation = 128         # Sampling reduction factor (higher = slower)
-                                            # 1 → 125 MS/s, 8 → 15.625 MS/s, 128 → ~1 MS/s
+        self.scope.decimation = 128
         self.scope.average = False
         self.scope.trigger_mode = 'auto'
         self.sample_rate = 125e6 / self.scope.decimation
@@ -82,7 +62,10 @@ class RedPitayaScope:
         self.test_freq = RP_FREQ
         self.test_amp = RP_AMP
         self.test_offset = RP_OFFSET
+
+        # Start continuous output
         self.setup_output()
+        self.scope.continuous()  # Ensure Red Pitaya continuously samples
 
     def create_yaml(self):
         if not os.path.exists(self.yaml_file):
@@ -114,7 +97,7 @@ class RedPitayaScope:
             }
             with open(self.yaml_file, 'w') as f:
                 yaml.dump(config, f)
-            print(f"Created fixed YAML: {self.yaml_file}")
+            print(f"Created YAML: {self.yaml_file}")
         else:
             print(f"YAML exists: {self.yaml_file}")
 
@@ -133,28 +116,16 @@ class RedPitayaScope:
             output_direct='out1',
             trigger_source='immediately'
         )
-        print(f"Output: {self.test_freq} Hz, {self.test_amp} V, Offset: {self.test_offset} V")
+        print(f"Red Pitaya output: {self.test_freq} Hz, {self.test_amp} V, Offset: {self.test_offset} V")
 
     def capture(self):
-        self.scope.single()
-        timeout = 2.0
-        dt = 0.01
-        elapsed = 0
-        while elapsed < timeout:
-            ch1 = np.array(self.scope._data_ch1_current)
-            ch2 = np.array(self.scope._data_ch2_current)
-            if ch1.size > 0 and ch2.size > 0:
-                return ch1, ch2
-            time.sleep(dt)
-            elapsed += dt
-        print("Acquisition timed out")
-        return None, None
-
-    def run(self):
-        return self.capture()
+        """Continuously capture latest scope data"""
+        ch1 = np.array(self.scope._data_ch1_current)
+        ch2 = np.array(self.scope._data_ch2_current)
+        return ch1, ch2
 
 # ============================================================
-# RODEOSTAT CONFIGURATION
+# RODEOSTAT SETUP
 # ============================================================
 def setup_rodeostat():
     ports = serial.tools.list_ports.comports()
@@ -224,36 +195,40 @@ def setup_rodeostat():
 def run_combined():
     rodeostat, MODE = setup_rodeostat()
     rp_scope = RedPitayaScope()
-    rp_scope.setup_output(freq=RP_FREQ, amp=RP_AMP, offset=RP_OFFSET)
 
     print(f"Running {MODE} test on Rodeostat...")
+
     try:
+        # --- Run Rodeostat while capturing Red Pitaya continuously ---
         t, volt, curr = rodeostat.run_test('cyclic', display='data', filename='data.txt')
     except Exception as e:
         print("Error running Rodeostat:", e)
         traceback.print_exc()
         return
 
+    # Convert Rodeostat outputs to NumPy arrays
+    t = np.array(t)
+    volt = np.array(volt)
+    curr = np.array(curr)
+
     print("Rodeostat measurement complete. Capturing RedPitaya AC signals...")
-    ch_in, ch_out = rp_scope.run()
-    if ch_in is None or ch_out is None:
-        print("No RedPitaya data captured")
-        return
+
+    # Capture Red Pitaya data
+    ch_in, ch_out = rp_scope.capture()
+    ch_in = np.array(ch_in)
+    ch_out = np.array(ch_out)
 
     t_rp = np.arange(len(ch_in)) / rp_scope.sample_rate
-    if RP_TIME_WINDOW:
-        max_samples = int(RP_TIME_WINDOW * rp_scope.sample_rate)
-        t_rp = t_rp[:max_samples]
-        ch_in = ch_in[:max_samples]
-        ch_out = ch_out[:max_samples]
 
+    # Interpolate Red Pitaya to Rodeostat timestamps
     ch_in_interp = np.interp(t, t_rp, ch_in, left=np.nan, right=np.nan)
     ch_out_interp = np.interp(t, t_rp, ch_out, left=np.nan, right=np.nan)
 
+    # Save combined data
     save_dir = os.path.join(os.getcwd(), "combined_data")
     os.makedirs(save_dir, exist_ok=True)
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-    save_path = os.path.join(save_dir, f"combined_cv_data_{timestamp}.csv")
+    save_path = os.path.join(save_dir, f"combined_data_{timestamp}.csv")
 
     combined = np.column_stack((t, volt, curr, ch_in_interp, ch_out_interp))
     header = "time_s,rodeostat_voltage_V,rodeostat_current_uA,redpitaya_in1_V,redpitaya_out1_V"
@@ -261,8 +236,9 @@ def run_combined():
 
     print(f"Combined data saved to: {save_path}")
 
+    # --- Plotting ---
     fig, axs = plt.subplots(3, 2, figsize=(15, 10))
-    fig.suptitle(f'Rodeostat & RedPitaya Combined Measurement', fontsize=16)
+    fig.suptitle('Rodeostat & RedPitaya Combined Measurement', fontsize=16)
 
     axs[0,0].plot(t, volt, color='tab:blue')
     axs[0,0].set_ylabel('Voltage (V)')
@@ -298,7 +274,7 @@ def run_combined():
     axs[2,0].axis('off')
     axs[2,1].axis('off')
 
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.tight_layout(rect=[0,0,1,0.96])
     plt.show()
 
 
