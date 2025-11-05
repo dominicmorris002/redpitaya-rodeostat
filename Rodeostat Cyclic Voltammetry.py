@@ -35,7 +35,7 @@ quiet_time = 0            # Time to stabilize before starting (seconds)
 quiet_value = 0.0         # Voltage during quiet time (V)
 
 volt_min = -0.1           # Minimum voltage (V)
-volt_max = 1.0            # Maximum voltage (V)
+volt_max = 1.0            # Maximum voltage (V) 1V, +/- 2V, +/- 5V, and +/- 10V
 volt_per_sec = 0.05       # Scan rate (V/s)
 num_cycles = 1            # Number of full cycles (min→max→min)
 
