@@ -5,6 +5,9 @@ Collects, saves, and plots voltage/current using built-in Rodeostat waveform eng
 - DC: Emulated with cyclic test where volt_min = volt_max
 - Ramp: Emulated with cyclic test where volt_min != volt_max and num_cycles=1
 - CV: Standard cyclic voltammetry
+
+Have A Great Day!! :)
+-Dominic
 """
 
 from potentiostat import Potentiostat
@@ -34,20 +37,21 @@ datafile = 'data.txt'
 # ---------------------------------------------------------------------
 # Test Parameters (all editable)
 # ---------------------------------------------------------------------
-MODE = 'DC'  # Options: 'DC', 'RAMP', 'CV'
-CURR_RANGE = '100uA'
-SAMPLE_RATE = 100.0  # Hz
+MODE = 'CV'  # Options: 'DC', 'RAMP', 'CV'
+CURR_RANGE = '1000uA'
+SAMPLE_RATE = 1000.0  # Hz
 QUIET_TIME = 0
 QUIET_VALUE = 0.0
 
 # DC / Ramp settings
-V_START = 1.0
-V_END = 0.5
+V_START = 1
+V_END = 0.8
+DC_RUNTIME = 30  # seconds, default for DC mode
 
 # CV settings
-VOLT_MIN = -0.1
+VOLT_MIN = 0.5
 VOLT_MAX = 1.0
-VOLT_PER_SEC = 0.05
+VOLT_PER_SEC = 0.10
 NUM_CYCLES = 1
 
 # ---------------------------------------------------------------------
@@ -60,7 +64,14 @@ if MODE.upper() == 'CV':
 elif MODE.upper() == 'DC':
     volt_min = V_START
     volt_max = V_START
-    num_cycles = 1
+    try:
+        DC_RUNTIME = float(input("Enter DC test runtime in seconds: "))
+    except:
+        DC_RUNTIME = 10
+    amplitude = 0
+    offset = V_START
+    period_ms = 1000  # 1 second per cycle (arbitrary)
+    num_cycles = max(1, int(DC_RUNTIME * 1000 / period_ms))
 elif MODE.upper() == 'RAMP':
     volt_min = V_START
     volt_max = V_END
@@ -68,12 +79,13 @@ elif MODE.upper() == 'RAMP':
 else:
     raise ValueError("Invalid MODE, choose 'DC', 'RAMP', or 'CV'")
 
-# Derived waveform settings
-amplitude = (volt_max - volt_min) / 2
-offset = (volt_max + volt_min) / 2
-period_ms = int(1000 * 4 * amplitude / VOLT_PER_SEC) if amplitude != 0 else 1000
-shift = 0.0
+# Derived waveform settings (for CV or RAMP)
+if MODE.upper() != 'DC':
+    amplitude = (volt_max - volt_min) / 2
+    offset = (volt_max + volt_min) / 2
+    period_ms = int(1000 * 4 * amplitude / VOLT_PER_SEC) if amplitude != 0 else 1000
 
+shift = 0.0
 test_param = {
     'quietValue': QUIET_VALUE,
     'quietTime': QUIET_TIME,
