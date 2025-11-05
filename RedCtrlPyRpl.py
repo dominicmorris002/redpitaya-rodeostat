@@ -28,7 +28,7 @@ class RedPitayaScope:
         self.create_yaml()
 
         # Connect to RedPitaya
-        self.rp = Pyrpl(config=self.yaml_file)
+        self.rp = Pyrpl(modules=['scope', 'asg0'], config=self.yaml_file)
 
         # Access modules
         self.scope = self.rp.rp.scope
@@ -38,8 +38,10 @@ class RedPitayaScope:
         self.scope.input1 = 'in1'
         self.scope.input2 = 'out1'
         self.scope.decimation = 128
+        self.scope.duration = 0.01  # 10 ms window
         self.scope.average = False
         self.scope.trigger_mode = 'auto'
+        self.scope.setup()  # force setup with proper params
         self.sample_rate = 125e6 / self.scope.decimation
 
         # Default output waveform
@@ -97,20 +99,23 @@ class RedPitayaScope:
             output_direct='out1',
             trigger_source='immediately'
         )
-        print(f"Output: {self.test_freq} Hz, {self.test_amp} V, Offset: {self.test_offset} V")
+        print(f"🔊 Output: {self.test_freq} Hz, {self.test_amp} V, Offset: {self.test_offset} V")
 
     def capture(self, timeout=1.0):
-        """Capture a single sweep and return IN1 and OUT1 data"""
-        self.scope.single()  # Trigger single acquisition
-        dt = 0.01
-        elapsed = 0
-        while elapsed < timeout:
-            ch1 = np.array(self.scope._data_ch1_current)
-            ch2 = np.array(self.scope._data_ch2_current)
-            if ch1.size > 0 and ch2.size > 0:
-                return ch1, ch2
-            time.sleep(dt)
-            elapsed += dt
+        """Capture a single sweep and return IN1 and OUT1 data safely"""
+        try:
+            self.scope.single()  # Trigger single acquisition
+            dt = 0.01
+            elapsed = 0
+            while elapsed < timeout:
+                ch1 = np.array(self.scope._data_ch1_current)
+                ch2 = np.array(self.scope._data_ch2_current)
+                if ch1.size > 0 and ch2.size > 0:
+                    return ch1, ch2
+                time.sleep(dt)
+                elapsed += dt
+        except Exception as e:
+            print("⚠️ Error during capture:", e)
         print("Acquisition timed out")
         return None, None
 
@@ -122,7 +127,7 @@ class RedPitayaScope:
             ch_in = ch_in[:max_samples]
             ch_out = ch_out[:max_samples]
 
-        # Calculate phase difference at the dominant frequency
+        # Phase difference at dominant frequency
         N = len(ch_in)
         fft_in = np.fft.rfft(ch_in * np.hanning(N))
         fft_out = np.fft.rfft(ch_out * np.hanning(N))
@@ -153,16 +158,18 @@ class RedPitayaScope:
             plt.pause(0.001)
 
     def run_continuous(self, time_window=TIME_WINDOW):
-        """Continuously acquire and plot scope data"""
+        """Continuously acquire and plot scope data safely"""
         print("Starting continuous capture. Press Ctrl+C to stop.")
         plt.ion()
         fig, ax = plt.subplots(figsize=(10, 4))
         try:
             while True:
-                ch_in, ch_out = self.capture()
+                ch_in, ch_out = self.capture(timeout=0.05)
                 if ch_in is None or ch_out is None:
+                    time.sleep(0.01)  # give RP a short recovery
                     continue
                 self.plot_time(ch_in, ch_out, ax=ax, time_window=time_window)
+                time.sleep(0.01)
         except KeyboardInterrupt:
             print("Stopped continuous capture")
             plt.ioff()
