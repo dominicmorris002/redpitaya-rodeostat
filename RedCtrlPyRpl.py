@@ -11,12 +11,14 @@ OUTPUT_DIR = 'scope_data'
 YAML_FILE = 'scope_config.yml'
 
 # Output waveform settings
-WAVEFORM_FREQ = 1000       # Hz
-WAVEFORM_AMP = 0.5         # V peak-to-peak
-WAVEFORM_OFFSET = 0.0      # DC offset
-TIME_WINDOW = 0.005        # Seconds for time-domain plot
-SHOW_FFT = False           # True to plot FFT, False for time-domain
-SAVE_FILE = False           # True to save plots, False to show interactively
+WAVEFORM_FREQ = 1000  # Hz
+WAVEFORM_AMP = 0.5  # V peak-to-peak
+WAVEFORM_OFFSET = 0.0  # DC offset
+TIME_WINDOW = 0.005  # Seconds for time-domain plot
+SHOW_FFT = False  # True to plot FFT, False for time-domain
+SAVE_FILE = False  # True to save plots, False to show interactively
+
+
 # ----------------------------------------------------------------------
 
 class RedPitayaScope:
@@ -34,14 +36,15 @@ class RedPitayaScope:
         self.scope = self.rp.rp.scope
         self.asg = self.rp.rp.asg0
 
-        # Scope setup
+        # Scope setup - KEY CHANGES HERE
         self.scope.input1 = 'in1'
         self.scope.input2 = 'out1'
         self.scope.decimation = 128
         self.scope.duration = 0.01  # 10 ms window
         self.scope.average = False
-        self.scope.trigger_mode = 'auto'
-        self.scope.setup()  # force setup with proper params
+        self.scope.trigger_source = 'immediately'  # Changed from auto edge trigger
+        self.scope.running_state = 'running_continuous'  # Force continuous mode
+
         self.sample_rate = 125e6 / self.scope.decimation
 
         # Default output waveform
@@ -64,8 +67,8 @@ class RedPitayaScope:
                     'hysteresis': 0.0,
                     'duration': 0.01,
                     'trigger_delay': 0.0,
-                    'trigger_source': 'ch1_positive_edge',
-                    'trigger_mode': 'auto',
+                    'trigger_source': 'immediately',  # Changed from edge trigger
+                    'running_state': 'running_continuous',  # Added this
                     'average': False,
                     'decimation': 128
                 },
@@ -101,23 +104,20 @@ class RedPitayaScope:
         )
         print(f"🔊 Output: {self.test_freq} Hz, {self.test_amp} V, Offset: {self.test_offset} V")
 
-    def capture(self, timeout=1.0):
-        """Capture a single sweep and return IN1 and OUT1 data safely"""
+    def capture(self):
+        """Capture current data in continuous mode"""
         try:
-            self.scope.single()  # Trigger single acquisition
-            dt = 0.01
-            elapsed = 0
-            while elapsed < timeout:
-                ch1 = np.array(self.scope._data_ch1_current)
-                ch2 = np.array(self.scope._data_ch2_current)
-                if ch1.size > 0 and ch2.size > 0:
-                    return ch1, ch2
-                time.sleep(dt)
-                elapsed += dt
+            # Use the internal data attributes that PyRPL provides
+            ch1 = np.array(self.scope._data_ch1)
+            ch2 = np.array(self.scope._data_ch2)
+
+            if ch1.size > 0 and ch2.size > 0:
+                return ch1, ch2
+            else:
+                return None, None
         except Exception as e:
-            print("⚠️ Error during capture:", e)
-        print("Acquisition timed out")
-        return None, None
+            print(f"⚠️ Error during capture: {e}")
+            return None, None
 
     def plot_time(self, ch_in, ch_out, ax=None, time_window=TIME_WINDOW):
         t = np.arange(len(ch_in)) / self.sample_rate
@@ -158,20 +158,27 @@ class RedPitayaScope:
             plt.pause(0.001)
 
     def run_continuous(self, time_window=TIME_WINDOW):
-        """Continuously acquire and plot scope data safely"""
+        """Continuously acquire and plot scope data"""
         print("Starting continuous capture. Press Ctrl+C to stop.")
+
+        # Ensure we're in continuous mode
+        self.scope.running_state = 'running_continuous'
+
         plt.ion()
         fig, ax = plt.subplots(figsize=(10, 4))
+
         try:
             while True:
-                ch_in, ch_out = self.capture(timeout=0.05)
+                ch_in, ch_out = self.capture()
                 if ch_in is None or ch_out is None:
-                    time.sleep(0.01)  # give RP a short recovery
+                    time.sleep(0.05)
                     continue
+
                 self.plot_time(ch_in, ch_out, ax=ax, time_window=time_window)
-                time.sleep(0.01)
+                time.sleep(0.05)  # Update rate ~20 Hz
+
         except KeyboardInterrupt:
-            print("Stopped continuous capture")
+            print("\nStopped continuous capture")
             plt.ioff()
             plt.show()
 
