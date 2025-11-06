@@ -37,21 +37,21 @@ datafile = 'data.txt'
 # ---------------------------------------------------------------------
 # Test Parameters (all editable)
 # ---------------------------------------------------------------------
-MODE = 'CV'  # Options: 'DC', 'RAMP', 'CV'
+MODE = 'RAMP'  # Options: 'DC', 'RAMP', 'CV'
 CURR_RANGE = '1000uA'
 SAMPLE_RATE = 1000.0  # Hz
 QUIET_TIME = 0
 QUIET_VALUE = 0.0
 
 # DC / Ramp settings
-V_START = 1
-V_END = 0.8
+V_START = 0.8   #LOW VALUE FOR RAMP, CONSTANT VALUE FOR DC MODE
+V_END = 1    #High Value FOR RAMP
 DC_RUNTIME = 30  # seconds, default for DC mode
 
 # CV settings
 VOLT_MIN = 0.5
 VOLT_MAX = 1.0
-VOLT_PER_SEC = 0.10
+VOLT_PER_SEC = 0.2
 NUM_CYCLES = 1
 
 # ---------------------------------------------------------------------
