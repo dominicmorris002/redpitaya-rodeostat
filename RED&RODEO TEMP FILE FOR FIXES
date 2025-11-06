@@ -3,7 +3,7 @@ Dominic Morris - Combined Rodeostat & RedPitaya AC/CV Viewer
 
 - Rodeostat: CV/DC/Ramp test with proper voltage & current plotting
 - RedPitaya: OUT1 voltage, IN1 voltage, IN1 current (via shunt)
-- Live synchronized plotting
+- Live synchronized plotting with continuous measurements
 """
 
 import os
@@ -19,16 +19,16 @@ from potentiostat import Potentiostat
 
 # ------------------------- User Parameters -------------------------
 COM_PORT = None
-RUN_TIME_SEC = 30
+RUN_TIME_SEC = 20
 MODE = 'CV'  # 'DC', 'RAMP', 'CV'
 CURR_RANGE = '1000uA'
-SAMPLE_RATE = 1000.0
+SAMPLE_RATE = 100.0  # Lower sample rate for stability
 VOLT_MIN = 0.5
 VOLT_MAX = 1.0
-VOLT_PER_SEC = 0.1
+VOLT_PER_SEC = 0.05  # Slower scan for 20s runtime
 NUM_CYCLES = 1
-QUIET_TIME = 0
-QUIET_VALUE = 0.0
+QUIET_TIME = 1  # 1 second quiet time before starting
+QUIET_VALUE = 0.5  # Start at lower voltage
 SHUNT_R = 10_000  # Ohms
 
 # RedPitaya waveform
@@ -40,7 +40,8 @@ WAVEFORM_OFFSET = 0.0
 TIME_WINDOW = 0.005
 
 # ------------------------- Rodeostat Setup -------------------------
-rodeostat_data = {'t': [], 'volt': [], 'curr': []}
+rodeostat_data = {'t': [], 'volt': [], 'curr': [], 'running': False}
+
 
 def setup_rodeostat():
     global COM_PORT
@@ -69,10 +70,18 @@ def setup_rodeostat():
     used_range = CURR_RANGE if CURR_RANGE in ranges else ranges[-1]
     if used_range != CURR_RANGE:
         print(f"Warning: Requested CURR_RANGE {CURR_RANGE} not available. Using {used_range}.")
-    CURR_RANGE_LOCAL = used_range
 
-    dev.set_curr_range(CURR_RANGE_LOCAL)
+    dev.set_curr_range(used_range)
     dev.set_sample_rate(SAMPLE_RATE)
+
+    # Clear any stale data in serial buffer
+    try:
+        dev.dev.reset_input_buffer()
+        dev.dev.reset_output_buffer()
+        time.sleep(0.1)
+        print("Serial buffers cleared")
+    except:
+        pass
 
     # Setup cyclic / DC / Ramp
     if MODE.upper() == 'CV':
@@ -106,19 +115,40 @@ def setup_rodeostat():
     dev.set_param('cyclic', test_param)
     return dev
 
+
 def run_rodeostat(dev, stop_event):
+    """Run Rodeostat test and collect data"""
     try:
-        t, volt, curr = dev.run_test('cyclic', display='data', filename=None)
-        idx = 0
-        while not stop_event.is_set() and idx < len(t):
-            rodeostat_data['t'].append(t[idx])
-            rodeostat_data['volt'].append(volt[idx])
-            rodeostat_data['curr'].append(curr[idx])
-            idx += 1
-            time.sleep(0.001)
+        rodeostat_data['running'] = True
+        print("Starting Rodeostat test...")
+
+        # Run test - this blocks until complete
+        t, volt, curr = dev.run_test('cyclic', display='data', filename='rodeostat_data.txt')
+
+        # Check if we got valid data
+        if t is None or len(t) == 0:
+            print("No data returned from Rodeostat")
+            rodeostat_data['running'] = False
+            return
+
+        print(f"Received {len(t)} samples from Rodeostat")
+
+        # Convert numpy arrays to lists and store
+        rodeostat_data['t'] = [float(x) for x in t]
+        rodeostat_data['volt'] = [float(x) for x in volt]
+        rodeostat_data['curr'] = [float(x) for x in curr]
+        print(f"Stored {len(rodeostat_data['t'])} samples")
+        print(f"Voltage range: {min(rodeostat_data['volt']):.3f} to {max(rodeostat_data['volt']):.3f} V")
+        print(f"Current range: {min(rodeostat_data['curr']):.1f} to {max(rodeostat_data['curr']):.1f} uA")
+
+        rodeostat_data['running'] = False
+        print("Rodeostat test complete")
+
     except Exception as e:
         print("Rodeostat error:", e)
         traceback.print_exc()
+        rodeostat_data['running'] = False
+
 
 # ------------------------- RedPitaya Setup -------------------------
 class RedPitayaScope:
@@ -127,15 +157,19 @@ class RedPitayaScope:
         self.rp = Pyrpl(modules=['scope', 'asg0'], config=YAML_FILE)
         self.scope = self.rp.rp.scope
         self.asg = self.rp.rp.asg0
+
+        # Configure for continuous mode
         self.scope.input1 = 'in1'
         self.scope.input2 = 'out1'
         self.scope.decimation = 128
         self.scope.duration = TIME_WINDOW
         self.scope.average = False
-        self.scope.trigger_mode = 'auto'
-        self.scope.setup()
+        self.scope.trigger_source = 'immediately'  # Free-running
+        self.scope.running_state = 'running_continuous'  # Continuous mode
+
         self.sample_rate = 125e6 / self.scope.decimation
         self.setup_output()
+        print("🔴 RedPitaya scope ready (continuous mode)")
 
     def create_yaml(self):
         if not os.path.exists(YAML_FILE):
@@ -151,8 +185,8 @@ class RedPitayaScope:
                     'hysteresis': 0.0,
                     'duration': TIME_WINDOW,
                     'trigger_delay': 0.0,
-                    'trigger_source': 'ch1_positive_edge',
-                    'trigger_mode': 'auto',
+                    'trigger_source': 'immediately',
+                    'running_state': 'running_continuous',
                     'average': False,
                     'decimation': 128
                 },
@@ -181,89 +215,144 @@ class RedPitayaScope:
             trigger_source='immediately'
         )
 
-    def capture(self, timeout=0.05):
+    def capture(self):
+        """Capture current data in continuous mode"""
         try:
-            self.scope.single()
-            elapsed = 0.0
-            dt = 0.01
-            while elapsed < timeout:
-                ch1 = np.array(self.scope._data_ch1_current)
-                ch2 = np.array(self.scope._data_ch2_current)
-                if ch1.size > 0 and ch2.size > 0:
-                    current = ch1 / SHUNT_R * 1e6  # uA
-                    return ch1, ch2, current
-                time.sleep(dt)
-                elapsed += dt
+            # Read current buffer (continuous mode automatically updates)
+            ch1 = np.array(self.scope._data_ch1)
+            ch2 = np.array(self.scope._data_ch2)
+
+            if ch1.size > 0 and ch2.size > 0:
+                current = ch1 / SHUNT_R * 1e6  # Convert to uA
+                return ch1, ch2, current
+            return None, None, None
+
         except Exception as e:
-            print("RedPitaya capture error:", e)
-        return None, None, None
+            print(f"⚠️ RedPitaya capture error: {e}")
+            return None, None, None
+
 
 # ------------------------- Main -------------------------
 if __name__ == '__main__':
     stop_event = threading.Event()
+
+    print("=" * 60)
+    print("Combined Rodeostat & RedPitaya Measurement System")
+    print("=" * 60)
+
     rodeostat_dev = setup_rodeostat()
     rp_scope = RedPitayaScope()
 
+    # Start Rodeostat in background thread
     rodeostat_thread = threading.Thread(target=run_rodeostat, args=(rodeostat_dev, stop_event))
     rodeostat_thread.start()
 
+    # Setup plots
     plt.ion()
-    fig, ax = plt.subplots(6, 1, figsize=(12, 16))
+    fig, ax = plt.subplots(3, 2, figsize=(14, 10))
+    fig.suptitle(f'{MODE} Test - Live Data', fontsize=14, fontweight='bold')
 
     start_time = time.time()
+    last_update = 0
+    plot_counter = 0
+
     try:
         while time.time() - start_time < RUN_TIME_SEC:
-            # Rodeostat plots
-            if rodeostat_data['t']:
-                ax[0].clear()
-                ax[0].plot(rodeostat_data['t'], rodeostat_data['volt'], label='Voltage')
-                ax[0].set_ylabel('V')
-                ax[0].set_title('Rodeostat Voltage vs Time')
-                ax[0].grid(True)
+            current_time = time.time() - start_time
 
-                ax[1].clear()
-                ax[1].plot(rodeostat_data['t'], rodeostat_data['curr'], label='Current')
-                ax[1].set_ylabel('uA')
-                ax[1].set_title('Rodeostat Current vs Time')
-                ax[1].grid(True)
+            # Update plots at ~10 Hz (reduced from 20 Hz for speed)
+            if current_time - last_update < 0.1:
+                time.sleep(0.02)
+                continue
+            last_update = current_time
+            plot_counter += 1
 
-                ax[2].clear()
-                ax[2].plot(rodeostat_data['volt'], rodeostat_data['curr'], label='IV Curve')
-                ax[2].set_xlabel('Voltage (V)')
-                ax[2].set_ylabel('Current (uA)')
-                ax[2].set_title('Rodeostat Voltage vs Current')
-                ax[2].grid(True)
+            # Only update Rodeostat plots every other frame (5 Hz)
+            if rodeostat_data['t'] and len(rodeostat_data['t']) > 0 and plot_counter % 2 == 0:
+                if plot_counter == 2:  # Print debug info once
+                    print(f"Plotting Rodeostat data: {len(rodeostat_data['t'])} points")
+                    print(f"  Time: {rodeostat_data['t'][0]:.3f} to {rodeostat_data['t'][-1]:.3f}")
+                    print(f"  Volt: {min(rodeostat_data['volt']):.3f} to {max(rodeostat_data['volt']):.3f}")
+                    print(f"  Curr: {min(rodeostat_data['curr']):.1f} to {max(rodeostat_data['curr']):.1f}")
 
-            # RedPitaya plots
-            ch_in, ch_out, current = rp_scope.capture(timeout=0.05)
+                # Voltage vs Time
+                ax[0, 0].clear()
+                ax[0, 0].plot(rodeostat_data['t'], rodeostat_data['volt'], 'b-', linewidth=1)
+                ax[0, 0].set_ylabel('Voltage (V)', fontweight='bold')
+                ax[0, 0].set_title('Rodeostat Voltage')
+                ax[0, 0].grid(True, alpha=0.3)
+                ax[0, 0].set_xlim([0, max(rodeostat_data['t'])])
+                ax[0, 0].set_ylim([min(rodeostat_data['volt']) - 0.05, max(rodeostat_data['volt']) + 0.05])
+
+                # Current vs Time
+                ax[1, 0].clear()
+                ax[1, 0].plot(rodeostat_data['t'], rodeostat_data['curr'], 'g-', linewidth=1)
+                ax[1, 0].set_ylabel('Current (µA)', fontweight='bold')
+                ax[1, 0].set_title('Rodeostat Current')
+                ax[1, 0].grid(True, alpha=0.3)
+                ax[1, 0].set_xlim([0, max(rodeostat_data['t'])])
+                curr_range = max(rodeostat_data['curr']) - min(rodeostat_data['curr'])
+                ax[1, 0].set_ylim([min(rodeostat_data['curr']) - 0.1 * curr_range,
+                                   max(rodeostat_data['curr']) + 0.1 * curr_range])
+
+                # IV Curve
+                ax[2, 0].clear()
+                ax[2, 0].plot(rodeostat_data['volt'], rodeostat_data['curr'], 'r-', linewidth=1)
+                ax[2, 0].set_xlabel('Voltage (V)', fontweight='bold')
+                ax[2, 0].set_ylabel('Current (µA)', fontweight='bold')
+                ax[2, 0].set_title('IV Curve')
+                ax[2, 0].grid(True, alpha=0.3)
+                ax[2, 0].set_xlim([min(rodeostat_data['volt']) - 0.05, max(rodeostat_data['volt']) + 0.05])
+                ax[2, 0].set_ylim([min(rodeostat_data['curr']) - 0.1 * curr_range,
+                                   max(rodeostat_data['curr']) + 0.1 * curr_range])
+
+            # Always update RedPitaya plots (right column)
+            ch_in, ch_out, current = rp_scope.capture()
             if ch_in is not None:
                 t_vec = np.arange(len(ch_in)) / rp_scope.sample_rate
 
-                ax[3].clear()
-                ax[3].plot(t_vec, ch_out, label='OUT1 Voltage')
-                ax[3].set_ylabel('V')
-                ax[3].set_title('RedPitaya OUT1 Voltage')
-                ax[3].grid(True)
+                # OUT1 Voltage (AC output)
+                ax[0, 1].clear()
+                ax[0, 1].plot(t_vec * 1000, ch_out, 'orange', linewidth=1)
+                ax[0, 1].set_ylabel('Voltage (V)', fontweight='bold')
+                ax[0, 1].set_title('RedPitaya OUT1 (AC Signal)')
+                ax[0, 1].grid(True, alpha=0.3)
 
-                ax[4].clear()
-                ax[4].plot(t_vec, ch_in, label='IN1 Voltage', color='tab:blue')
-                ax[4].set_ylabel('V')
-                ax[4].set_title('RedPitaya IN1 Voltage')
-                ax[4].grid(True)
+                # IN1 Voltage
+                ax[1, 1].clear()
+                ax[1, 1].plot(t_vec * 1000, ch_in, 'tab:blue', linewidth=1)
+                ax[1, 1].set_ylabel('Voltage (V)', fontweight='bold')
+                ax[1, 1].set_title('RedPitaya IN1')
+                ax[1, 1].grid(True, alpha=0.3)
 
-                ax[5].clear()
-                ax[5].plot(t_vec, current, label='Calculated Current (uA)', color='tab:red')
-                ax[5].set_ylabel('uA')
-                ax[5].set_xlabel('Time (s)')
-                ax[5].set_title('RedPitaya IN1 Current via Shunt')
-                ax[5].grid(True)
+                # Calculated Current via Shunt
+                ax[2, 1].clear()
+                ax[2, 1].plot(t_vec * 1000, current, 'tab:red', linewidth=1)
+                ax[2, 1].set_xlabel('Time (ms)', fontweight='bold')
+                ax[2, 1].set_ylabel('Current (µA)', fontweight='bold')
+                ax[2, 1].set_title(f'IN1 Current (R={SHUNT_R}Ω)')
+                ax[2, 1].grid(True, alpha=0.3)
 
-            plt.pause(0.01)
+            plt.tight_layout()
+            plt.pause(0.001)
+
+            # Check if Rodeostat finished
+            if rodeostat_data['running'] == False and len(rodeostat_data['t']) > 0:
+                print("Rodeostat measurement complete")
+                # Continue running to show final plots
+                if time.time() - start_time > RUN_TIME_SEC:
+                    break
 
     except KeyboardInterrupt:
-        print("Acquisition stopped by user.")
+        print("\nAcquisition stopped by user")
     finally:
         stop_event.set()
-        rodeostat_thread.join()
+        rodeostat_thread.join(timeout=2)
         plt.ioff()
+
+        print("\n" + "=" * 60)
+        print("Measurement Complete!")
+        print(f"Rodeostat samples: {len(rodeostat_data['t'])}")
+        print("=" * 60)
+
         plt.show()
