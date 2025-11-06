@@ -1,97 +1,119 @@
 """
-Rodeostat + RedPitaya Simultaneous Acquisition
+AC Cyclic Voltammetry - Step Measurements
 Dominic Morris
 
-- Rodeostat: CV measurement
-- RedPitaya: OUT1/IN1 capture, calculates current from IN1 via shunt resistor
-- Both run simultaneously
-- Plots update live
+Takes RedPitaya AC measurements at each voltage step during Rodeostat CV
+No live plotting - all plots shown at end
 """
 
 import os
 import time
-import threading
-import queue
 import numpy as np
+import yaml
 import matplotlib.pyplot as plt
 import serial.tools.list_ports
 import traceback
-import yaml
 from pyrpl import Pyrpl
 from potentiostat import Potentiostat
 
 # ------------------------- User Parameters -------------------------
-COM_PORT = 'COM5'
-RUN_TIME_SEC = 30
-MODE = 'CV'
+COM_PORT = None
+MODE = 'RAMP'
 CURR_RANGE = '1000uA'
 SAMPLE_RATE = 1000.0
-VOLT_MIN = 0.5
-VOLT_MAX = 1.0
-VOLT_PER_SEC = 0.1
-NUM_CYCLES = 1
 QUIET_TIME = 0
 QUIET_VALUE = 0.0
-SHUNT_R = 1000              # Ohms for RedPitaya current calculation
 
-# RedPitaya waveform
+# RAMP/DC settings
+V_START = 0.8
+V_END = 1.0
+DC_RUNTIME = 30
+
+# CV settings
+VOLT_MIN = 0.5
+VOLT_MAX = 1.0
+VOLT_PER_SEC = 0.2
+NUM_CYCLES = 1
+
+# RedPitaya settings
 HOSTNAME = 'rp-f073ce.local'
 YAML_FILE = 'scope_config.yml'
 WAVEFORM_FREQ = 1000
 WAVEFORM_AMP = 0.5
 WAVEFORM_OFFSET = 0.0
 TIME_WINDOW = 0.005
+SHUNT_R = 10_000
+
+# How many AC measurements to take per voltage step
+AC_MEASUREMENTS_PER_STEP = 5
+
 
 # ------------------------- Rodeostat Setup -------------------------
-rodeostat_data = {'t': [], 'volt': [], 'curr': []}
-
 def setup_rodeostat():
+    global COM_PORT
+    ports = serial.tools.list_ports.comports()
+    if not ports:
+        raise SystemExit("No serial ports found.")
+
+    print("Available COM ports:")
+    for i, p in enumerate(ports):
+        print(f"{i}: {p.device} - {p.description}")
+
+    if COM_PORT is None:
+        choice = int(input("Select port number: "))
+        COM_PORT = ports[choice].device
+
     print("Using port:", COM_PORT)
+
     dev = Potentiostat(COM_PORT)
 
-    # Patch unknown hardware
     try:
         _ = dev.get_all_curr_range()
     except KeyError:
-        print("Unknown hardware variant. Using fallback ranges.")
+        print("Unknown firmware. Adding current range list manually.")
         dev.hw_variant = 'manual_patch'
         dev.get_all_curr_range = lambda: ['1uA', '10uA', '100uA', '1000uA']
 
     dev.set_curr_range(CURR_RANGE)
     dev.set_sample_rate(SAMPLE_RATE)
 
-    # Setup cyclic parameters
-    volt_min = VOLT_MIN
-    volt_max = VOLT_MAX
-    amplitude = (volt_max - volt_min) / 2
-    offset = (volt_max + volt_min) / 2
-    period_ms = int(1000 * 4 * amplitude / VOLT_PER_SEC) if amplitude != 0 else 1000
+    # Convert mode to cyclic parameters
+    if MODE.upper() == 'CV':
+        volt_min = VOLT_MIN
+        volt_max = VOLT_MAX
+        num_cycles = NUM_CYCLES
+    elif MODE.upper() == 'DC':
+        volt_min = V_START
+        volt_max = V_START
+        amplitude = 0
+        offset = V_START
+        period_ms = 1000
+        num_cycles = max(1, int(DC_RUNTIME * 1000 / period_ms))
+    elif MODE.upper() == 'RAMP':
+        volt_min = V_START
+        volt_max = V_END
+        num_cycles = 1
+    else:
+        raise ValueError("Invalid MODE, choose 'DC', 'RAMP', or 'CV'")
+
+    if MODE.upper() != 'DC':
+        amplitude = (volt_max - volt_min) / 2
+        offset = (volt_max + volt_min) / 2
+        period_ms = int(1000 * 4 * amplitude / VOLT_PER_SEC) if amplitude != 0 else 1000
+
     test_param = {
         'quietValue': QUIET_VALUE,
         'quietTime': QUIET_TIME,
         'amplitude': amplitude,
         'offset': offset,
         'period': period_ms,
-        'numCycles': NUM_CYCLES,
+        'numCycles': num_cycles,
         'shift': 0.0
     }
+
     dev.set_param('cyclic', test_param)
     return dev
 
-def run_rodeostat(dev, stop_event):
-    print("Starting Rodeostat test...")
-    try:
-        t, volt, curr = dev.run_test('cyclic', display='data', filename=None)
-        idx = 0
-        while not stop_event.is_set() and idx < len(t):
-            rodeostat_data['t'].append(t[idx])
-            rodeostat_data['volt'].append(volt[idx])
-            rodeostat_data['curr'].append(curr[idx])
-            idx += 1
-            time.sleep(0.001)
-    except Exception as e:
-        print("Error running Rodeostat test:", e)
-        traceback.print_exc()
 
 # ------------------------- RedPitaya Setup -------------------------
 class RedPitayaScope:
@@ -101,16 +123,17 @@ class RedPitayaScope:
         self.scope = self.rp.rp.scope
         self.asg = self.rp.rp.asg0
 
-        # Scope setup
         self.scope.input1 = 'in1'
         self.scope.input2 = 'out1'
         self.scope.decimation = 128
         self.scope.duration = TIME_WINDOW
         self.scope.average = False
-        self.scope.trigger_mode = 'auto'
-        self.scope.setup()
+        self.scope.trigger_source = 'immediately'
+        self.scope.running_state = 'running_continuous'
+
         self.sample_rate = 125e6 / self.scope.decimation
         self.setup_output()
+        print("RedPitaya initialized")
 
     def create_yaml(self):
         if not os.path.exists(YAML_FILE):
@@ -122,12 +145,9 @@ class RedPitayaScope:
                     'ch2_active': True,
                     'input1': 'in1',
                     'input2': 'out1',
-                    'threshold': 0.0,
-                    'hysteresis': 0.0,
                     'duration': TIME_WINDOW,
-                    'trigger_delay': 0.0,
-                    'trigger_source': 'ch1_positive_edge',
-                    'trigger_mode': 'auto',
+                    'trigger_source': 'immediately',
+                    'running_state': 'running_continuous',
                     'average': False,
                     'decimation': 128
                 },
@@ -143,89 +163,210 @@ class RedPitayaScope:
             with open(YAML_FILE, 'w') as f:
                 yaml.dump(config, f)
 
-    def setup_output(self, freq=None, amp=None, offset=None):
-        freq = freq or WAVEFORM_FREQ
-        amp = amp or WAVEFORM_AMP
-        offset = offset or WAVEFORM_OFFSET
+    def setup_output(self):
         self.asg.setup(
             waveform='sin',
-            frequency=freq,
-            amplitude=amp,
-            offset=offset,
+            frequency=WAVEFORM_FREQ,
+            amplitude=WAVEFORM_AMP,
+            offset=WAVEFORM_OFFSET,
             output_direct='out1',
             trigger_source='immediately'
         )
 
-    def capture(self, timeout=0.05):
+    def capture(self):
         try:
-            self.scope.single()
-            elapsed = 0.0
-            dt = 0.01
-            while elapsed < timeout:
-                ch1 = np.array(self.scope._data_ch1_current)
-                ch2 = np.array(self.scope._data_ch2_current)
-                if ch1.size > 0 and ch2.size > 0:
-                    current = ch1 / SHUNT_R * 1e6  # uA
-                    return ch1, ch2, current
-                time.sleep(dt)
-                elapsed += dt
+            ch1 = np.array(self.scope._data_ch1)
+            ch2 = np.array(self.scope._data_ch2)
+
+            if ch1.size > 0 and ch2.size > 0:
+                current = ch1 / SHUNT_R * 1e6
+                return ch1, ch2, current
         except Exception as e:
-            print("RedPitaya capture error:", e)
+            print(f"RedPitaya capture error: {e}")
         return None, None, None
 
-# ------------------------- Main -------------------------
-if __name__ == '__main__':
-    stop_event = threading.Event()
 
-    # Devices
+# ------------------------- Main Measurement -------------------------
+if __name__ == '__main__':
+    print("=" * 60)
+    print("AC Cyclic Voltammetry - Step-by-Step Measurement")
+    print("=" * 60)
+
+    # Setup devices
     rodeostat_dev = setup_rodeostat()
     rp_scope = RedPitayaScope()
 
-    rodeostat_thread = threading.Thread(target=run_rodeostat, args=(rodeostat_dev, stop_event))
-    rodeostat_thread.start()
+    # Storage for synchronized data
+    accv_data = {
+        'rodeo_t': [],
+        'rodeo_volt': [],
+        'rodeo_curr': [],
+        'ac_voltage_amplitude': [],
+        'ac_current_amplitude': [],
+        'ac_phase': []
+    }
 
-    plt.ion()
-    fig, ax = plt.subplots(3, 1, figsize=(12, 8))
+    print(f"\nRunning {MODE.upper()} test with AC measurements...")
+    print("This will take the full measurement time.\n")
 
-    start_time = time.time()
+    # Run Rodeostat test
     try:
-        while time.time() - start_time < RUN_TIME_SEC:
-            # Rodeostat plots
-            if rodeostat_data['t']:
-                ax[0].clear()
-                ax[0].plot(rodeostat_data['t'], rodeostat_data['volt'], label='Voltage')
-                ax[0].plot(rodeostat_data['t'], rodeostat_data['curr'], label='Current')
-                ax[0].set_ylabel('V / uA')
-                ax[0].set_title('Rodeostat')
-                ax[0].legend()
-                ax[0].grid(True)
+        t, volt, curr = rodeostat_dev.run_test('cyclic', display='data', filename='data.txt')
+    except Exception as e:
+        print("Error running test:", e)
+        traceback.print_exc()
+        raise SystemExit
 
-            # RedPitaya plots
-            ch_in, ch_out, current = rp_scope.capture(timeout=0.05)
-            if ch_in is not None and ch_out is not None:
-                t_vec = np.arange(len(ch_in)) / rp_scope.sample_rate
-                ax[1].clear()
-                ax[1].plot(t_vec, ch_out, label='OUT1 Voltage')
-                ax[1].set_ylabel('V')
-                ax[1].set_title('RedPitaya OUT1')
-                ax[1].grid(True)
-                ax[1].legend()
+    print(f"\nRodeostat measurement complete: {len(t)} samples")
+    print("Test complete. Data saved to data.txt")
 
-                ax[2].clear()
-                ax[2].plot(t_vec, ch_in, label='IN1 Voltage')
-                ax[2].plot(t_vec, current, label='IN1 Current (uA)')
-                ax[2].set_ylabel('V / uA')
-                ax[2].set_xlabel('Time (s)')
-                ax[2].set_title('RedPitaya IN1 / Calculated Current')
-                ax[2].grid(True)
-                ax[2].legend()
+    # Store Rodeostat data
+    accv_data['rodeo_t'] = t
+    accv_data['rodeo_volt'] = volt
+    accv_data['rodeo_curr'] = curr
 
-            plt.pause(0.01)
+    # Now take AC measurements at key voltage points
+    print("\nTaking AC measurements at voltage steps...")
 
-    except KeyboardInterrupt:
-        print("Acquisition stopped by user.")
-    finally:
-        stop_event.set()
-        rodeostat_thread.join()
-        plt.ioff()
-        plt.show()
+    # Determine sampling points (every N samples)
+    total_samples = len(t)
+    step_interval = max(1, total_samples // 50)  # Take ~50 measurements across sweep
+
+    for i in range(0, total_samples, step_interval):
+        voltage = volt[i]
+        dc_current = curr[i]
+
+        # Take multiple AC measurements and average
+        ac_volt_amps = []
+        ac_curr_amps = []
+        phases = []
+
+        for _ in range(AC_MEASUREMENTS_PER_STEP):
+            ch_in, ch_out, current = rp_scope.capture()
+            if ch_in is not None:
+                # Calculate AC amplitude (peak-to-peak / 2)
+                ac_volt_amp = (np.max(ch_in) - np.min(ch_in)) / 2
+                ac_curr_amp = (np.max(current) - np.min(current)) / 2
+
+                # Calculate phase difference via FFT
+                N = len(ch_in)
+                if N > 0:
+                    fft_in = np.fft.rfft(ch_in * np.hanning(N))
+                    fft_out = np.fft.rfft(ch_out * np.hanning(N))
+                    peak_idx = np.argmax(np.abs(fft_in))
+                    phase_rad = np.angle(fft_in[peak_idx]) - np.angle(fft_out[peak_idx])
+                    phase_deg = np.degrees(phase_rad)
+
+                    ac_volt_amps.append(ac_volt_amp)
+                    ac_curr_amps.append(ac_curr_amp)
+                    phases.append(phase_deg)
+
+            time.sleep(0.02)
+
+        if ac_volt_amps:
+            accv_data['ac_voltage_amplitude'].append(np.mean(ac_volt_amps))
+            accv_data['ac_current_amplitude'].append(np.mean(ac_curr_amps))
+            accv_data['ac_phase'].append(np.mean(phases))
+
+        if (i // step_interval) % 10 == 0:
+            print(f"  Progress: {i}/{total_samples} samples")
+
+    print("\nAC measurements complete!")
+
+    # ------------------------- Plot Results -------------------------
+    print("\nGenerating plots...")
+
+    fig = plt.figure(figsize=(14, 10))
+
+    # Rodeostat voltage vs time
+    plt.subplot(3, 3, 1)
+    plt.plot(accv_data['rodeo_t'], accv_data['rodeo_volt'], 'b-')
+    plt.ylabel('Voltage (V)')
+    plt.title('Rodeostat Voltage')
+    plt.grid(True)
+
+    # Rodeostat current vs time
+    plt.subplot(3, 3, 4)
+    plt.plot(accv_data['rodeo_t'], accv_data['rodeo_curr'], 'g-')
+    plt.ylabel('Current (uA)')
+    plt.title('Rodeostat DC Current')
+    plt.grid(True)
+
+    # IV Curve (CV)
+    plt.subplot(3, 3, 7)
+    plt.plot(accv_data['rodeo_volt'], accv_data['rodeo_curr'], 'r-')
+    plt.xlabel('Voltage (V)')
+    plt.ylabel('Current (uA)')
+    plt.title(f'{MODE.upper()} Curve')
+    plt.grid(True)
+
+    # AC voltage amplitude vs DC voltage
+    plt.subplot(3, 3, 2)
+    sample_voltages = [accv_data['rodeo_volt'][i] for i in range(0, len(accv_data['rodeo_volt']), step_interval)][
+                      :len(accv_data['ac_voltage_amplitude'])]
+    plt.plot(sample_voltages, accv_data['ac_voltage_amplitude'], 'o-', color='orange')
+    plt.ylabel('AC Voltage Amplitude (V)')
+    plt.title('AC Voltage Response')
+    plt.grid(True)
+
+    # AC current amplitude vs DC voltage
+    plt.subplot(3, 3, 5)
+    plt.plot(sample_voltages, accv_data['ac_current_amplitude'], 'o-', color='purple')
+    plt.ylabel('AC Current Amplitude (uA)')
+    plt.title('AC Current Response')
+    plt.grid(True)
+
+    # Phase vs DC voltage
+    plt.subplot(3, 3, 8)
+    plt.plot(sample_voltages, accv_data['ac_phase'], 'o-', color='brown')
+    plt.xlabel('DC Voltage (V)')
+    plt.ylabel('Phase (degrees)')
+    plt.title('AC Phase Shift')
+    plt.grid(True)
+
+    # AC impedance magnitude vs DC voltage
+    plt.subplot(3, 3, 3)
+    impedance = np.array(accv_data['ac_voltage_amplitude']) / (
+                np.array(accv_data['ac_current_amplitude']) / 1e6)  # Convert uA to A
+    plt.plot(sample_voltages, impedance, 'o-', color='teal')
+    plt.ylabel('Impedance (Ohms)')
+    plt.title('AC Impedance vs DC Bias')
+    plt.grid(True)
+
+    # Nyquist-like plot (Re vs Im of impedance)
+    plt.subplot(3, 3, 6)
+    Z_real = impedance * np.cos(np.radians(accv_data['ac_phase']))
+    Z_imag = impedance * np.sin(np.radians(accv_data['ac_phase']))
+    plt.plot(Z_real, Z_imag, 'o-', color='navy')
+    plt.xlabel('Z Real (Ohms)')
+    plt.ylabel('Z Imaginary (Ohms)')
+    plt.title('Impedance Components')
+    plt.grid(True)
+
+    # Summary text
+    plt.subplot(3, 3, 9)
+    plt.axis('off')
+    summary_text = f"""
+    ACCV Measurement Summary
+
+    Mode: {MODE.upper()}
+    Rodeostat Samples: {len(accv_data['rodeo_t'])}
+    AC Measurements: {len(accv_data['ac_voltage_amplitude'])}
+
+    DC Voltage Range: 
+      {min(accv_data['rodeo_volt']):.3f} to {max(accv_data['rodeo_volt']):.3f} V
+
+    DC Current Range:
+      {min(accv_data['rodeo_curr']):.1f} to {max(accv_data['rodeo_curr']):.1f} uA
+
+    AC Frequency: {WAVEFORM_FREQ} Hz
+    AC Amplitude: {WAVEFORM_AMP} V
+    Shunt R: {SHUNT_R} Ohms
+    """
+    plt.text(0.1, 0.5, summary_text, fontsize=10, family='monospace', verticalalignment='center')
+
+    plt.tight_layout()
+    plt.show()
+
+    print("\nMeasurement complete!")
+    print("=" * 60)
