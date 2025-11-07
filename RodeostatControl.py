@@ -14,6 +14,9 @@ from potentiostat import Potentiostat
 import matplotlib.pyplot as plt
 import serial.tools.list_ports
 import traceback
+import numpy as np
+import os
+from datetime import datetime
 
 # ---------------------------------------------------------------------
 # Port setup
@@ -32,20 +35,24 @@ print("Using port:", port)
 # ---------------------------------------------------------------------
 # File setup
 # ---------------------------------------------------------------------
-datafile = 'data.txt'
+output_dir = 'rodeostat_data'
+os.makedirs(output_dir, exist_ok=True)
+
+# Generate timestamped filename
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # ---------------------------------------------------------------------
 # Test Parameters (all editable)
 # ---------------------------------------------------------------------
-MODE = 'RAMP'  # Options: 'DC', 'RAMP', 'CV'
+MODE = 'CV'  # Options: 'DC', 'RAMP', 'CV'
 CURR_RANGE = '1000uA'
 SAMPLE_RATE = 1000.0  # Hz
 QUIET_TIME = 0
 QUIET_VALUE = 0.0
 
 # DC / Ramp settings
-V_START = 0.8   #LOW VALUE FOR RAMP, CONSTANT VALUE FOR DC MODE
-V_END = 1    #High Value FOR RAMP
+V_START = 0.8  # Start voltage for RAMP, constant value for DC mode
+V_END = 1  # End voltage for RAMP (can be higher or lower than V_START)
 DC_RUNTIME = 30  # seconds, default for DC mode
 
 # CV settings
@@ -61,6 +68,8 @@ if MODE.upper() == 'CV':
     volt_min = VOLT_MIN
     volt_max = VOLT_MAX
     num_cycles = NUM_CYCLES
+    ramp_direction = 'normal'
+
 elif MODE.upper() == 'DC':
     volt_min = V_START
     volt_max = V_START
@@ -72,10 +81,20 @@ elif MODE.upper() == 'DC':
     offset = V_START
     period_ms = 1000  # 1 second per cycle (arbitrary)
     num_cycles = max(1, int(DC_RUNTIME * 1000 / period_ms))
+    ramp_direction = 'normal'
+
 elif MODE.upper() == 'RAMP':
-    volt_min = V_START
-    volt_max = V_END
+    # Handle both ascending and descending ramps
+    if V_START < V_END:
+        volt_min = V_START
+        volt_max = V_END
+        ramp_direction = 'ascending'
+    else:
+        volt_min = V_END
+        volt_max = V_START
+        ramp_direction = 'descending'
     num_cycles = 1
+
 else:
     raise ValueError("Invalid MODE, choose 'DC', 'RAMP', or 'CV'")
 
@@ -85,7 +104,12 @@ if MODE.upper() != 'DC':
     offset = (volt_max + volt_min) / 2
     period_ms = int(1000 * 4 * amplitude / VOLT_PER_SEC) if amplitude != 0 else 1000
 
-shift = 0.0
+# Adjust shift for descending ramps
+if MODE.upper() == 'RAMP' and ramp_direction == 'descending':
+    shift = 0.5  # Start at the peak (descending)
+else:
+    shift = 0.0  # Start at the valley (ascending)
+
 test_param = {
     'quietValue': QUIET_VALUE,
     'quietTime': QUIET_TIME,
@@ -122,35 +146,52 @@ except Exception as e:
 # Run test
 # ---------------------------------------------------------------------
 print(f"Running {MODE.upper()} test (using cyclic waveform)")
+if MODE.upper() == 'RAMP':
+    print(f"Ramp direction: {V_START}V → {V_END}V ({ramp_direction})")
+
 try:
-    t, volt, curr = dev.run_test('cyclic', display='data', filename=datafile)
+    t, volt, curr = dev.run_test('cyclic', display='data', filename=None)
 except Exception as e:
     print("Error running test:", e)
     traceback.print_exc()
     raise SystemExit
 
-print("Test complete. Data saved to", datafile)
+print("Test complete.")
+
+# ---------------------------------------------------------------------
+# Save to CSV
+# ---------------------------------------------------------------------
+datafile_csv = os.path.join(output_dir, f'{MODE.lower()}_data_{timestamp}.csv')
+
+# Prepare data for CSV
+csv_data = np.column_stack((t, volt, curr))
+header = 'Time(s),Voltage(V),Current(uA)'
+
+# Save to CSV
+np.savetxt(datafile_csv, csv_data, delimiter=',', header=header, comments='')
+print(f"💾 CSV data saved to {datafile_csv}")
 
 # ---------------------------------------------------------------------
 # Plot results
 # ---------------------------------------------------------------------
-plt.figure(1)
+plt.figure(1, figsize=(10, 8))
 plt.subplot(211)
-plt.plot(t, volt)
+plt.plot(t, volt, linewidth=1.5)
 plt.ylabel('Voltage (V)')
+plt.title(f'{MODE.upper()} Test Results')
 plt.grid(True)
 
 plt.subplot(212)
-plt.plot(t, curr)
+plt.plot(t, curr, linewidth=1.5)
 plt.ylabel('Current (uA)')
 plt.xlabel('Time (s)')
 plt.grid(True)
 
-plt.figure(2)
-plt.plot(volt, curr)
+plt.figure(2, figsize=(8, 6))
+plt.plot(volt, curr, linewidth=1.5)
 plt.xlabel('Voltage (V)')
 plt.ylabel('Current (uA)')
-plt.title(f'{MODE.upper()} Test')
+plt.title(f'{MODE.upper()} Test - I-V Curve')
 plt.grid(True)
 
 plt.tight_layout()
