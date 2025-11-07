@@ -22,36 +22,35 @@ from datetime import datetime
 import threading
 
 # ------------------------- Red Pitaya Parameters -------------------------
-RP_HOSTNAME = 'rp-f073ce.local'
+RP_HOSTNAME = 'rp-f073ce.local'  # Red Pitaya network address
 RP_OUTPUT_DIR = 'accv_data'
-RP_YAML_FILE = 'accv_config.yml'
+RP_YAML_FILE = 'red_rodeo_config.yml'
 
 # AC signal settings (Red Pitaya)
-AC_FREQ = 1000  # Hz
-AC_AMP = 0.5  # V peak-to-peak
-AC_OFFSET = 0.0  # DC offset
-TIME_WINDOW = 0.005  # Seconds for time-domain plot
-SHUNT_RESISTOR = 10000  # Ohms (10kΩ)
+AC_FREQ = 1000  # Hz (1 Hz - 62.5 MHz)
+AC_AMP = 0.5  # V peak-to-peak (0 - 2 V, limited by output range ±1V)
+AC_OFFSET = 0.0  # DC offset (-1 to +1 V)
+TIME_WINDOW = 0.005  # Seconds for time-domain plot (0.001 - 1 s typical)
+SHUNT_RESISTOR = 10000  # Ohms (10 - 100k typical for low current measurements)
 
 # ------------------------- Rodeostat Parameters -------------------------
 # CV settings (Rodeostat)
 CV_MODE = 'CV'  # Options: 'DC', 'RAMP', 'CV'
-CURR_RANGE = '1000uA'
-SAMPLE_RATE = 1000.0  # Hz
-QUIET_TIME = 0
-QUIET_VALUE = 0.0
+CURR_RANGE = '1000uA'  # Options: '1uA', '10uA', '100uA', '1000uA'
+SAMPLE_RATE = 1000.0  # Hz (10 - 1000 Hz typical)
+QUIET_TIME = 0  # Seconds (0 - 10 s)
+QUIET_VALUE = 0.0  # V (-1.5 to +1.5 V typical)
 
 # CV sweep parameters
-VOLT_MIN = 0.5
-VOLT_MAX = 1.0
-VOLT_PER_SEC = 0.2
-NUM_CYCLES = 1
+VOLT_MIN = 0.5  # V (-1.5 to +1.5 V, must be < VOLT_MAX)
+VOLT_MAX = 1.0  # V (-1.5 to +1.5 V, must be > VOLT_MIN)
+VOLT_PER_SEC = 0.2  # V/s (0.001 - 1.0 V/s typical)
+NUM_CYCLES = 1  # Number of CV cycles (1 - 100)
 
 # DC / Ramp settings (if needed)
-V_START = 0.8
-V_END = 1.0
-DC_RUNTIME = 30
-
+V_START = 0.8  # V (-1.5 to +1.5 V)
+V_END = 1.0  # V (-1.5 to +1.5 V, can be > or < V_START for ramp)
+DC_RUNTIME = 30  # seconds (1 - 3600 s typical)
 
 # ----------------------------------------------------------------------
 
@@ -69,7 +68,7 @@ class RedPitayaACMeasurement:
         self.create_yaml()
 
         # Connect to RedPitaya
-        print("🔌 Connecting to Red Pitaya...")
+        print("Connecting to Red Pitaya...")
         self.rp = Pyrpl(config=self.yaml_file, gui=False, hostname=RP_HOSTNAME)
         self.scope = self.rp.rp.scope
         self.asg = self.rp.rp.asg0
@@ -84,7 +83,7 @@ class RedPitayaACMeasurement:
         self.scope.running_state = 'running_continuous'
 
         self.sample_rate = 125e6 / self.scope.decimation
-        print(f"✅ Red Pitaya connected (Sample rate: {self.sample_rate / 1e3:.1f} kHz)")
+        print(f"Red Pitaya connected (Sample rate: {self.sample_rate/1e3:.1f} kHz)")
 
     def create_yaml(self):
         # Always recreate config to ensure correct hostname
@@ -129,7 +128,7 @@ class RedPitayaACMeasurement:
             output_direct='out1',
             trigger_source='immediately'
         )
-        print(f"🔊 AC Output: {freq} Hz, {amp} V, Offset: {offset} V")
+        print(f"AC Output: {freq} Hz, {amp} V, Offset: {offset} V")
 
     def capture(self):
         """Capture current data"""
@@ -140,7 +139,7 @@ class RedPitayaACMeasurement:
                 return ch1, ch2
             return None, None
         except Exception as e:
-            print(f"⚠️ Red Pitaya capture error: {e}")
+            print(f"Red Pitaya capture error: {e}")
             return None, None
 
     def calculate_current(self, voltage):
@@ -171,7 +170,7 @@ class RodeostatCVMeasurement:
     """Handles Rodeostat CV measurements"""
 
     def __init__(self, port):
-        print(f"🔌 Connecting to Rodeostat on {port}...")
+        print(f"Connecting to Rodeostat on {port}...")
         self.dev = Potentiostat(port)
 
         # Patch for unknown firmware
@@ -182,7 +181,7 @@ class RodeostatCVMeasurement:
             self.dev.hw_variant = 'manual_patch'
             self.dev.get_all_curr_range = lambda: ['1uA', '10uA', '100uA', '1000uA']
 
-        print("✅ Rodeostat connected")
+        print("Rodeostat connected")
 
     def configure(self, mode, volt_min, volt_max, volt_per_sec, num_cycles,
                   v_start, v_end, dc_runtime, curr_range, sample_rate,
@@ -233,13 +232,13 @@ class RodeostatCVMeasurement:
         self.dev.set_sample_rate(sample_rate)
         self.dev.set_param('cyclic', test_param)
 
-        print(f"📊 CV configured: {volt_min}V to {volt_max}V, {num_cycles} cycles")
+        print(f"CV configured: {volt_min}V to {volt_max}V, {num_cycles} cycles")
 
     def run_test(self):
         """Run the CV test"""
-        print("▶️ Starting CV sweep...")
+        print("Starting CV sweep...")
         t, volt, curr = self.dev.run_test('cyclic', display='data', filename=None)
-        print("✅ CV sweep complete")
+        print("CV sweep complete")
         return t, volt, curr
 
 
@@ -272,9 +271,9 @@ class ACCVExperiment:
 
     def run_synchronized_test(self):
         """Run synchronized ACCV measurement"""
-        print("\n" + "=" * 60)
-        print("🚀 Starting Synchronized ACCV Experiment")
-        print("=" * 60)
+        print("="*60)
+        print("Starting Synchronized ACCV Experiment")
+        print("="*60)
 
         # Start Red Pitaya AC measurement in background thread
         self.ac_thread = threading.Thread(target=self.red_pitaya.collect_data_continuously)
@@ -307,7 +306,7 @@ class ACCVExperiment:
         cv_data = np.column_stack((t_cv, volt_cv, curr_cv))
         cv_header = 'Time(s),Voltage(V),Current(uA)'
         np.savetxt(cv_filename, cv_data, delimiter=',', header=cv_header, comments='')
-        print(f"💾 CV data saved to: {cv_filename}")
+        print(f"CV data saved to: {cv_filename}")
 
         # Save AC data if available
         if ch_in1 is not None and ch_out1 is not None:
@@ -323,7 +322,7 @@ class ACCVExperiment:
             ac_data = np.column_stack((t_ac, ch_out1, ch_in1, current_ac))
             ac_header = 'Time(s),OUT1_Voltage(V),IN1_Voltage(V),IN1_Current(mA)'
             np.savetxt(ac_filename, ac_data, delimiter=',', header=ac_header, comments='')
-            print(f"💾 AC data saved to: {ac_filename}")
+            print(f"AC data saved to: {ac_filename}")
 
     def plot_results(self, t_cv, volt_cv, curr_cv, ch_in1, ch_out1):
         """Plot comprehensive results"""
@@ -422,12 +421,12 @@ def main():
         # Plot results
         experiment.plot_results(t_cv, volt_cv, curr_cv, ch_in1, ch_out1)
 
-        print("\n" + "=" * 60)
-        print("✅ ACCV Experiment Complete!")
-        print("=" * 60)
+        print("\n" + "="*60)
+        print("ACCV Experiment Complete!")
+        print("="*60)
 
     except Exception as e:
-        print(f"\n❌ Error during experiment: {e}")
+        print(f"\nError during experiment: {e}")
         traceback.print_exc()
 
 
