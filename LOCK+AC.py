@@ -72,7 +72,7 @@ class RedPitayaCombined:
         self.ki = self.pid.i
         self.ival = self.pid.ival
 
-        # Scope setup for general acquisition
+        # Scope setup for general acquisition (default)
         self.scope.input1 = 'in1'
         self.scope.input2 = 'out1'
         self.scope.decimation = 128
@@ -138,8 +138,8 @@ class RedPitayaCombined:
         
         print(f"🔒 Lock-in setup: {self.ref_freq} Hz, {ref_amp} V")
 
-    def capture_scope(self):
-        """Capture data from scope in continuous mode"""
+    def capture(self):
+        """Capture data in continuous mode (for scope signals)"""
         try:
             ch1 = np.array(self.scope._data_ch1)
             ch2 = np.array(self.scope._data_ch2)
@@ -149,34 +149,27 @@ class RedPitayaCombined:
             else:
                 return None, None
         except Exception as e:
-            print(f"⚠️ Error during scope capture: {e}")
+            print(f"⚠️ Error during capture: {e}")
             return None, None
 
     def capture_lockin(self):
         """
-        Captures lock-in X and Y data and appends them to arrays
-        Note: Scope must be configured for lock-in inputs (iq2, iq2_2)
+        Captures lock-in X and Y data in continuous mode
+        Uses continuous mode like capture() - no scope.single() call
         """
-        # Switch scope to lock-in inputs temporarily
-        old_input1 = self.scope.input1
-        old_input2 = self.scope.input2
-        
-        self.scope.input1 = 'iq2'
-        self.scope.input2 = 'iq2_2'
-        
-        self.scope.single()
-        ch1 = np.array(self.scope._data_ch1_current)
-        ch2 = np.array(self.scope._data_ch2_current)
+        try:
+            ch1 = np.array(self.scope._data_ch1)
+            ch2 = np.array(self.scope._data_ch2)
 
-        if self.scope.input1 == 'iq2' and self.scope.input2 == 'iq2_2':
-            self.lockin_X.append(ch1)
-            self.lockin_Y.append(ch2)
-
-        # Restore original scope inputs
-        self.scope.input1 = old_input1
-        self.scope.input2 = old_input2
-
-        return ch1, ch2
+            if ch1.size > 0 and ch2.size > 0:
+                self.lockin_X.append(ch1)
+                self.lockin_Y.append(ch2)
+                return ch1, ch2
+            else:
+                return None, None
+        except Exception as e:
+            print(f"⚠️ Error during lock-in capture: {e}")
+            return None, None
 
     def plot_all_signals(self, ch_in1, ch_out1, axes, time_window=TIME_WINDOW):
         """Plot OUT1 and IN1 voltages"""
@@ -277,13 +270,13 @@ class RedPitayaCombined:
         print(f"💾 Scope data saved to: {filename}")
         return filename
 
-    def run_continuous_scope(self, time_window=TIME_WINDOW, run_time=None):
+    def run_continuous(self, time_window=TIME_WINDOW, run_time=None):
         """Continuously acquire and plot scope data"""
         if run_time is None:
-            print("Starting continuous scope capture...")
+            print("Starting continuous capture...")
             print("Press Ctrl+C to stop.")
         else:
-            print(f"Starting scope capture for {run_time} seconds...")
+            print(f"Starting capture for {run_time} seconds...")
 
         # Ensure we're in continuous mode
         self.scope.running_state = 'running_continuous'
@@ -301,10 +294,10 @@ class RedPitayaCombined:
                 if run_time is not None:
                     elapsed = time.time() - start_time
                     if elapsed >= run_time:
-                        print(f"\n✅ Completed {run_time} second scope acquisition")
+                        print(f"\n✅ Completed {run_time} second acquisition")
                         break
 
-                ch_in1, ch_out1 = self.capture_scope()
+                ch_in1, ch_out1 = self.capture()
                 if ch_in1 is None or ch_out1 is None:
                     time.sleep(0.05)
                     continue
@@ -325,19 +318,23 @@ class RedPitayaCombined:
         plt.show()
 
     def run_lockin(self, params):
-        """Run lock-in acquisition"""
+        """Run lock-in acquisition using continuous mode"""
         timeout = params['timeout']
 
         self.setup_lockin(params)
         time.sleep(0.01)
 
-        # Configure scope for lock-in acquisition
+        # Save original scope settings
         old_input1 = self.scope.input1
         old_input2 = self.scope.input2
         old_decimation = self.scope.decimation
-        
+        old_duration = self.scope.duration
+        old_average = self.scope.average
+
+        # Configure scope for lock-in acquisition
         self.scope.input1 = 'iq2'
         self.scope.input2 = 'iq2_2'
+        
         if params.get('lockin_decimation'):
             if params['lockin_decimation'] in self.allowed_decimations:
                 self.scope.decimation = params['lockin_decimation']
@@ -346,21 +343,48 @@ class RedPitayaCombined:
                 print(f"Invalid decimation {params['lockin_decimation']}, using default 64")
                 self.scope.decimation = 64
                 self.sample_rate = 125e6 / 64
+        else:
+            # Default lock-in decimation
+            self.scope.decimation = 64
+            self.sample_rate = 125e6 / 64
 
-        self.scope._start_acquisition_rolling_mode()
-        self.scope.average = True
+        # Set up for continuous mode (like the scope file)
+        self.scope.duration = 0.01  # 10 ms window
+        self.scope.average = False
+        self.scope.trigger_source = 'immediately'
+        self.scope.running_state = 'running_continuous'
+
+        # Clear previous data
+        self.lockin_X = []
+        self.lockin_Y = []
 
         loop_start = time.time()
 
         print(f"🔒 Starting lock-in acquisition for {timeout} seconds...")
-        while (time.time() - loop_start) < timeout:
-            self.capture_lockin()
+        print(f"   Using continuous mode (decimation: {self.scope.decimation}, sample rate: {self.sample_rate:.0f} Hz)")
+        
+        try:
+            while (time.time() - loop_start) < timeout:
+                ch1, ch2 = self.capture_lockin()
+                if ch1 is None or ch2 is None:
+                    time.sleep(0.05)
+                    continue
+                time.sleep(0.05)  # Small delay like in run_continuous
+
+        except KeyboardInterrupt:
+            print("\n⏹️ Lock-in acquisition stopped by user")
 
         # Restore original scope settings
         self.scope.input1 = old_input1
         self.scope.input2 = old_input2
         self.scope.decimation = old_decimation
-        self.sample_rate = 125e6 / self.scope.decimation
+        self.scope.duration = old_duration
+        self.scope.average = old_average
+        self.sample_rate = 125e6 / old_decimation
+
+        if len(self.lockin_X) == 0:
+            print("⚠️ No lock-in data captured!")
+            return
 
         self.all_X = np.array(np.concatenate(self.lockin_X))
         self.all_Y = np.array(np.concatenate(self.lockin_Y))
@@ -380,6 +404,11 @@ class RedPitayaCombined:
             # Plot 2: R and Theta vs time
             plt.subplot(1, 2, 2)
             t = np.arange(start=0, stop=len(self.all_X)/self.sample_rate, step=1/self.sample_rate)
+            if len(t) > len(R):
+                t = t[:len(R)]
+            elif len(t) < len(R):
+                R = R[:len(t)]
+                Theta = Theta[:len(t)]
             plt.plot(t, R, label='R (Magnitude)')
             plt.plot(t, Theta, label='Theta (Phase)')
             plt.title('Lock-in R and Theta vs Time')
@@ -393,6 +422,11 @@ class RedPitayaCombined:
             self.see_fft()
         else:
             t = np.arange(start=0, stop=len(self.all_X)/self.sample_rate, step=1/self.sample_rate)
+            if len(t) > len(R):
+                t = t[:len(R)]
+            elif len(t) < len(R):
+                R = R[:len(R)]
+                Theta = Theta[:len(R)]
             plt.figure(figsize=(10, 6))
             plt.plot(t, R, label='R')
             plt.plot(t, Theta, label='Theta')
@@ -426,7 +460,7 @@ if __name__ == '__main__':
     print("=" * 60)
     rp.setup_output(freq=WAVEFORM_FREQ, amp=WAVEFORM_AMP, offset=WAVEFORM_OFFSET)
     # Uncomment to run:
-    # rp.run_continuous_scope(time_window=TIME_WINDOW, run_time=RUN_TIME)
+    # rp.run_continuous(time_window=TIME_WINDOW, run_time=RUN_TIME)
 
     # Option 2: Run lock-in amplifier
     print("\n" + "=" * 60)
