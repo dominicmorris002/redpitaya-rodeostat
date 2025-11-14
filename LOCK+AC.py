@@ -1,325 +1,264 @@
-import time
-import numpy as np
-import yaml
-from matplotlib import pyplot as plt
+"""
+Red Pitaya Outputs Ac Wave and Lockin Amplifier
+"""
+import math
+
 from pyrpl import Pyrpl
+import numpy as np
+from matplotlib import pyplot as plt
+import time
+import csv
+import os
 
-# ------------------------- Waveform Parameters -------------------------
-HOSTNAME = 'rp-f073ce.local'
-OUTPUT_DIR = 'lockin_data'
-YAML_FILE = 'lockin_config.yml'
+N_FFT_SHOW = 10
 
-# Output waveform settings (reference signal)
-WAVEFORM_FREQ = 1000  # Hz
-WAVEFORM_AMP = 0.5  # V peak-to-peak
-WAVEFORM_OFFSET = 0.0  # DC offset
+class RedPitaya:
 
-# Lock-in settings
-LOCKIN_BANDWIDTH = 10  # Hz, bandwidth for lock-in filter
-LOCKIN_GAIN = 1.0  # Lock-in gain
+    electrode_map = {'A': (False, False), 'B': (True, False), 'C': (False, True), 'D': (True, True)}
+    current_range_map = {'10uA': (False, True, True, True), '100uA': (True, False, True, True), '1mA': (True, True, False, True), '10mA': (True, True, True, False)}
+    dac_gain_map = {'1X': (False, False), '5X': (False, True), '2X': (True, False), '10X': (True, True)}
+    current_scaling_map = {'10mA': 65, '1mA': 600, '100uA': 6000, '10uA': 60000}
+    allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
-# Acquisition settings
-RUN_TIME = 25  # Seconds to run acquisition
-UPDATE_INTERVAL = 0.1  # Seconds between plot updates
-TIME_WINDOW = 5.0  # Seconds of data to display in time-domain plots
-
-# ----------------------------------------------------------------------
-
-class RedPitayaLockinScope:
-    def __init__(self, hostname=HOSTNAME, output_dir=OUTPUT_DIR, yaml_file=YAML_FILE):
+    def __init__(self, output_dir='test_data'):
+        self.rp = Pyrpl(config='lockin_config', hostname='rp-f073ce.local')
         self.output_dir = output_dir
-        self.yaml_file = yaml_file
 
-        # Connect to RedPitaya
-        self.rp = Pyrpl(modules=['scope', 'asg0', 'iq0'], config=self.yaml_file)
-
-        # Access modules
-        self.scope = self.rp.rp.scope
-        self.asg = self.rp.rp.asg0  # Reference signal generator
-        self.lockin = self.rp.rp.iq0  # Lock-in amplifier
-
-        # Scope setup - capture raw signals (fastest acquisition)
-        self.scope.input1 = 'in1'  # Raw input signal
-        self.scope.input2 = 'out1'  # Reference output signal
-        self.scope.decimation = 1  # Minimum decimation for fastest sampling (125 MHz)
-        self.scope.duration = 0.001  # 1 ms window for fast updates
-        self.scope.average = False
-        self.scope.trigger_source = 'immediately'
-        self.scope.running_state = 'running_continuous'
-
-        self.sample_rate = 125e6 / self.scope.decimation
-
-        # Data buffers for continuous acquisition
-        self.time_buffer = []
-        self.in1_buffer = []
-        self.out1_buffer = []
-        self.lockin_X_buffer = []
-        self.lockin_Y_buffer = []
-        self.lockin_R_buffer = []
-        self.lockin_Theta_buffer = []
-        
-        self.start_time = None
-
-        # Default output waveform
-        self.ref_freq = WAVEFORM_FREQ
-        self.ref_amp = WAVEFORM_AMP
-        self.ref_offset = WAVEFORM_OFFSET
+        self.rp_modules = self.rp.rp
+        self.lockin = self.rp_modules.iq2
+        self.ref_sig = self.rp_modules.asg0
         self.ref_start_t = 0.0
+        self.lockin_X = []
+        self.all_X = []
+        self.lockin_Y = []
+        self.all_Y = []
 
-    def setup_output_and_lockin(self, freq=None, amp=None, offset=None, 
-                                 bandwidth=LOCKIN_BANDWIDTH, gain=LOCKIN_GAIN):
-        """Setup both the reference signal and lock-in amplifier"""
-        if freq is not None:
-            self.ref_freq = freq
-        if amp is not None:
-            self.ref_amp = amp
-        if offset is not None:
-            self.ref_offset = offset
+        self.pid = self.rp_modules.pid0
+        self.kp = self.pid.p
+        self.ki = self.pid.i
+        self.ival = self.pid.ival
 
-        # Setup reference signal output
-        self.asg.setup(
-            waveform='sin',
-            frequency=self.ref_freq,
-            amplitude=self.ref_amp,
-            offset=self.ref_offset,
-            output_direct='out1',
-            trigger_source='immediately'
-        )
-        
+        self.scope = self.rp_modules.scope
+        self.scope.input1 = 'iq2'
+        self.scope.input2 = 'iq2_2'
+        self.scope.decimation = 64
+
+        if self.scope.decimation not in self.allowed_decimations:
+            print('Invalid decimation')
+            exit()
+
+        self.scope._start_acquisition_rolling_mode()
+        self.scope.average = 'true'
+        self.sample_rate = 125e6/self.scope.decimation
+
+    def setup_lockin(self, params):
+        self.ref_freq = params['ref_freq']
+        self.ref_period = 1/self.ref_freq
+        ref_amp = params['ref_amp']
+
+        self.ref_sig.setup(waveform='sin',
+                           amplitude=ref_amp,
+                           frequency=self.ref_freq)
+
         self.ref_start_t = time.time()
-        ref_period = 1 / self.ref_freq
 
-        # Setup lock-in amplifier
-        self.lockin.setup(
-            frequency=self.ref_freq,
-            bandwidth=[-self.ref_freq * 2, -self.ref_freq, self.ref_freq, self.ref_freq * 2],
-            gain=gain,
-            phase=((time.time() - self.ref_start_t) / ref_period) * 360,
-            acbandwidth=0,
-            amplitude=self.ref_amp,
-            input='in1',  # Measure from IN1
-            output_direct='off',  # Don't output lock-in signal
-            quadrature_factor=10
-        )
+        if params['output_ref'] == 'out1' or params['output_ref'] == 'out2':
+            self.ref_sig.output_direct = params['output_ref']
+        else:
+            self.ref_sig.output_direct = 'off'
 
-        print(f"🔊 Reference Output (OUT1): {self.ref_freq} Hz, {self.ref_amp} V, Offset: {self.ref_offset} V")
-        print(f"🔒 Lock-in configured: Freq={self.ref_freq} Hz, Bandwidth={bandwidth} Hz, Gain={gain}")
+        self.lockin.setup(frequency=self.ref_freq,
+                       bandwidth=[-self.ref_freq * 2, -self.ref_freq, self.ref_freq, self.ref_freq * 2],  # Hz
+                       gain=1.0,
+                       phase=((time.time() - self.ref_start_t)/self.ref_period)*360,       #initial phase is in degrees (delta t[ns])-> delta t [s]/(1/f) * 360
+                       acbandwidth=0,
+                       amplitude=ref_amp,
+                       input='in1',
+                       output_direct='out2',
+                       output_signal='output_direct',
+                       quadrature_factor=10)
 
-    def capture(self):
-        """Capture data in continuous mode - fastest possible"""
-        try:
-            in1 = np.array(self.scope._data_ch1)
-            out1 = np.array(self.scope._data_ch2)
-            
-            # Get lock-in X and Y directly from the lock-in module
-            lockin_X = self.lockin.quadrature_values[0]
-            lockin_Y = self.lockin.quadrature_values[1]
-            
-            if in1.size > 0 and out1.size > 0:
-                # Calculate R and Theta from X and Y
-                lockin_R = np.sqrt(lockin_X**2 + lockin_Y**2)
-                lockin_Theta = np.arctan2(lockin_Y, lockin_X)
-                
-                # Replicate lock-in values to match array length
-                lockin_X_array = np.full_like(in1, lockin_X)
-                lockin_Y_array = np.full_like(in1, lockin_Y)
-                lockin_R_array = np.full_like(in1, lockin_R)
-                lockin_Theta_array = np.full_like(in1, lockin_Theta)
-                
-                return in1, out1, lockin_X_array, lockin_Y_array, lockin_R_array, lockin_Theta_array
-            else:
-                return None, None, None, None, None, None
-        except Exception as e:
-            print(f"⚠️ Error during capture: {e}")
-            return None, None, None, None, None, None
+    def capture_lockin(self):
+        """
+        captures a self.scope.decimation length capture and appends them to the X and Y arrays
+        :return:
+        """
+        self.scope.single()
+        ch1 = np.array(self.scope._data_ch1_current)
+        ch2 = np.array(self.scope._data_ch2_current)
 
-    def update_buffers(self, in1, out1, lockin_X, lockin_Y, lockin_R, lockin_Theta):
-        """Add new data to buffers"""
-        current_time = time.time() - self.start_time
-        n_samples = len(in1)
-        time_array = np.linspace(current_time, current_time + n_samples/self.sample_rate, n_samples)
-        
-        self.time_buffer.extend(time_array)
-        self.in1_buffer.extend(in1)
-        self.out1_buffer.extend(out1)
-        self.lockin_X_buffer.extend(lockin_X)
-        self.lockin_Y_buffer.extend(lockin_Y)
-        self.lockin_R_buffer.extend(lockin_R)
-        self.lockin_Theta_buffer.extend(lockin_Theta)
+        if self.scope.input1 == 'iq2' and self.scope.input2 == 'iq2_2':
+            self.lockin_X.append(ch1)
+            self.lockin_Y.append(ch2)
 
-    def plot_all_signals(self, axes, time_window=TIME_WINDOW):
-        """Plot all signals: OUT1, IN1, Lock-in X/Y, R, and Theta"""
-        if len(self.time_buffer) == 0:
-            return
+        return ch1, ch2
 
-        # Convert to arrays
-        t = np.array(self.time_buffer)
-        out1 = np.array(self.out1_buffer)
-        in1 = np.array(self.in1_buffer)
-        X = np.array(self.lockin_X_buffer)
-        Y = np.array(self.lockin_Y_buffer)
-        R = np.array(self.lockin_R_buffer)
-        Theta = np.array(self.lockin_Theta_buffer)
+    def see_fft(self):
+        iq = self.all_X + 1j*self.all_Y
+        n_pts = len(iq)
+        win = np.hanning(n_pts)
+        IQwin = iq * win
+        IQfft = np.fft.fftshift(np.fft.fft(IQwin))
+        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / self.sample_rate))
+        psd_lock = (np.abs(IQfft) ** 2) / (self.sample_rate * np.sum(win ** 2))
 
-        # Limit to time window (show last N seconds)
-        if time_window and len(t) > 0:
-            latest_time = t[-1]
-            mask = t >= (latest_time - time_window)
-            t = t[mask]
-            out1 = out1[mask]
-            in1 = in1[mask]
-            X = X[mask]
-            Y = Y[mask]
-            R = R[mask]
-            Theta = Theta[mask]
+        idx = np.argmax(psd_lock)  # PSD computed as above
+        print("Peak at", freqs_lock[idx], "Hz")
 
-        # Clear all axes
-        for ax in axes:
-            ax.clear()
+        plt.figure(1, figsize=(12, 4))
 
-        # Plot 1: OUT1 Reference Signal
-        axes[0].plot(t, out1, color='tab:orange', linewidth=1, alpha=0.8)
-        axes[0].set_ylabel('Voltage (V)')
-        axes[0].set_title('OUT1 Reference Signal')
-        axes[0].grid(True, alpha=0.3)
-
-        # Plot 2: Raw IN1 signal
-        axes[1].plot(t, in1, color='tab:blue', linewidth=1, alpha=0.7)
-        axes[1].set_ylabel('Voltage (V)')
-        axes[1].set_title('IN1 Measured Signal')
-        axes[1].grid(True, alpha=0.3)
-
-        # Plot 3: Lock-in X and Y components
-        axes[2].plot(t, X, color='tab:green', linewidth=1.5, label='X (in-phase)', alpha=0.8)
-        axes[2].plot(t, Y, color='tab:cyan', linewidth=1.5, label='Y (quadrature)', alpha=0.8)
-        axes[2].set_ylabel('Voltage (V)')
-        axes[2].set_title('Lock-in Demodulated Components')
-        axes[2].legend(loc='upper right')
-        axes[2].grid(True, alpha=0.3)
-
-        # Plot 4: Lock-in Amplitude (R)
-        axes[3].plot(t, R, color='tab:red', linewidth=1.5)
-        axes[3].set_ylabel('Amplitude (V)')
-        axes[3].set_title('Lock-in Amplitude (R)')
-        axes[3].grid(True, alpha=0.3)
-
-        # Plot 5: Lock-in Phase (Theta)
-        axes[4].plot(t, np.degrees(Theta), color='tab:purple', linewidth=1.5)
-        axes[4].set_ylabel('Phase (degrees)')
-        axes[4].set_xlabel('Time (s)')
-        axes[4].set_title('Lock-in Phase (θ)')
-        axes[4].grid(True, alpha=0.3)
+        plt.semilogy(freqs_lock, psd_lock, label='Lock-in R')
+        plt.xlabel('Frequency (Hz)')
+        plt.ylabel('Power (a.u.)')
+        plt.title('Lock-in Output Spectrum (baseband)')
+        plt.legend()
+        plt.grid(True)
 
         plt.tight_layout()
-        plt.pause(0.001)
 
-    def save_to_csv(self):
-        """Save all captured data to CSV file"""
-        if len(self.time_buffer) == 0:
-            print("⚠️ No data to save")
-            return None
+    def run(self, params):
+        timeout = params['timeout']
 
-        # Create filename with timestamp
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        filename = f'{self.output_dir}/lockin_data_{self.ref_freq}Hz_{timestamp}.csv'
+        self.setup_lockin(params)
+        time.sleep(0.01)
 
-        # Prepare data
-        data = np.column_stack((
-            self.time_buffer,
-            self.out1_buffer,
-            self.in1_buffer,
-            self.lockin_X_buffer,
-            self.lockin_Y_buffer,
-            self.lockin_R_buffer,
-            np.degrees(self.lockin_Theta_buffer)
-        ))
-        
-        header = 'Time(s),OUT1_Ref(V),IN1_Measured(V),Lockin_X(V),Lockin_Y(V),Lockin_R(V),Lockin_Theta(deg)'
+        loop_start = time.time()
 
-        # Create output directory if needed
-        import os
-        os.makedirs(self.output_dir, exist_ok=True)
+        while (time.time() - loop_start) < timeout:
+            self.capture_lockin()
 
-        # Save to CSV
-        np.savetxt(filename, data, delimiter=',', header=header, comments='')
-        print(f"💾 Data saved to: {filename}")
-        
-        # Also save a summary
-        print(f"📊 Summary:")
-        print(f"   Mean R: {np.mean(self.lockin_R_buffer):.6f} V")
-        print(f"   Std R: {np.std(self.lockin_R_buffer):.6f} V")
-        print(f"   Mean Theta: {np.degrees(np.mean(self.lockin_Theta_buffer)):.2f}°")
-        
-        return filename
+        self.all_X = np.array(np.concatenate(self.lockin_X))
+        self.all_Y = np.array(np.concatenate(self.lockin_Y))
+        R = np.sqrt(self.all_X ** 2 + self.all_Y ** 2)
+        Theta = np.arctan2(self.all_Y, self.all_X)
 
-    def run_continuous(self, time_window=TIME_WINDOW, run_time=RUN_TIME, 
-                       update_interval=UPDATE_INTERVAL):
-        """Continuously acquire and plot lock-in data"""
-        print(f"Starting continuous lock-in acquisition for {run_time} seconds...")
-        print(f"Reference: {self.ref_freq} Hz, {self.ref_amp} V")
-        print("Press Ctrl+C to stop early.")
+        # Time array
+        t = np.arange(start=0, stop=len(self.all_X) / self.sample_rate, step=1 / self.sample_rate)
 
-        # Ensure we're in continuous mode
-        self.scope.running_state = 'running_continuous'
+        # FFT calculations
+        iq = self.all_X + 1j * self.all_Y
+        n_pts = len(iq)
+        win = np.hanning(n_pts)
+        IQwin = iq * win
+        IQfft = np.fft.fftshift(np.fft.fft(IQwin))
+        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / self.sample_rate))
+        psd_lock = (np.abs(IQfft) ** 2) / (self.sample_rate * np.sum(win ** 2))
 
-        plt.ion()
-        fig, axes = plt.subplots(5, 1, figsize=(12, 12))
+        idx = np.argmax(psd_lock)
+        print("Peak at", freqs_lock[idx], "Hz")
 
-        self.start_time = time.time()
-        last_update = self.start_time
+        # Create comprehensive plot with all lock-in outputs
+        fig = plt.figure(figsize=(16, 10))
 
-        try:
-            while True:
-                current_time = time.time()
-                elapsed = current_time - self.start_time
+        # 1. FFT Spectrum
+        ax1 = plt.subplot(3, 3, 1)
+        ax1.semilogy(freqs_lock, psd_lock, label='Lock-in PSD')
+        ax1.set_xlabel('Frequency (Hz)')
+        ax1.set_ylabel('Power (a.u.)')
+        ax1.set_title('FFT Spectrum (baseband)')
+        ax1.legend()
+        ax1.grid(True)
 
-                # Check if run_time has elapsed
-                if elapsed >= run_time:
-                    print(f"\n✅ Completed {run_time} second acquisition")
-                    break
+        # 2. X vs Time
+        ax2 = plt.subplot(3, 3, 2)
+        ax2.plot(t, self.all_X, 'b-', linewidth=0.5)
+        ax2.set_xlabel('Time (s)')
+        ax2.set_ylabel('X (V)')
+        ax2.set_title('In-phase (X) vs Time')
+        ax2.grid(True)
 
-                # Capture data
-                in1, out1, X, Y, R, Theta = self.capture()
-                if in1 is None:
-                    time.sleep(0.001)  # Minimal sleep for fastest acquisition
-                    continue
+        # 3. Y vs Time
+        ax3 = plt.subplot(3, 3, 3)
+        ax3.plot(t, self.all_Y, 'r-', linewidth=0.5)
+        ax3.set_xlabel('Time (s)')
+        ax3.set_ylabel('Y (V)')
+        ax3.set_title('Quadrature (Y) vs Time')
+        ax3.grid(True)
 
-                # Update buffers
-                self.update_buffers(in1, out1, X, Y, R, Theta)
+        # 4. X vs Y (IQ plot)
+        ax4 = plt.subplot(3, 3, 4)
+        ax4.plot(self.all_X, self.all_Y, 'g.', markersize=1, alpha=0.5)
+        ax4.set_xlabel('X (V)')
+        ax4.set_ylabel('Y (V)')
+        ax4.set_title('IQ Plot (X vs Y)')
+        ax4.grid(True)
+        ax4.axis('equal')
 
-                # Update plot at specified interval
-                if (current_time - last_update) >= update_interval:
-                    self.plot_all_signals(axes, time_window=time_window)
-                    last_update = current_time
-                    print(f"\rTime: {elapsed:.1f}s / {run_time}s", end='', flush=True)
+        # 5. R vs Time
+        ax5 = plt.subplot(3, 3, 5)
+        ax5.plot(t, R, 'm-', linewidth=0.5)
+        ax5.set_xlabel('Time (s)')
+        ax5.set_ylabel('R (V)')
+        ax5.set_title('Magnitude (R) vs Time')
+        ax5.grid(True)
 
-                # No sleep here for maximum speed
+        # 6. Theta vs Time
+        ax6 = plt.subplot(3, 3, 6)
+        ax6.plot(t, Theta, 'c-', linewidth=0.5)
+        ax6.set_xlabel('Time (s)')
+        ax6.set_ylabel('Theta (rad)')
+        ax6.set_title('Phase (Theta) vs Time')
+        ax6.grid(True)
 
-        except KeyboardInterrupt:
-            print("\n⏹️ Stopped by user")
+        # 7. All signals (X, Y, R, Theta) normalized
+        ax7 = plt.subplot(3, 3, 7)
+        ax7.plot(t, self.all_X / np.max(np.abs(self.all_X)), label='X (norm)', alpha=0.7)
+        ax7.plot(t, self.all_Y / np.max(np.abs(self.all_Y)), label='Y (norm)', alpha=0.7)
+        ax7.plot(t, R / np.max(R), label='R (norm)', alpha=0.7)
+        ax7.plot(t, Theta / np.max(np.abs(Theta)), label='Theta (norm)', alpha=0.7)
+        ax7.set_xlabel('Time (s)')
+        ax7.set_ylabel('Normalized Amplitude')
+        ax7.set_title('All Signals (Normalized)')
+        ax7.legend()
+        ax7.grid(True)
 
-        # Save data
-        self.save_to_csv()
+        # 8. R histogram
+        ax8 = plt.subplot(3, 3, 8)
+        ax8.hist(R, bins=50, edgecolor='black', alpha=0.7)
+        ax8.set_xlabel('R (V)')
+        ax8.set_ylabel('Count')
+        ax8.set_title('Magnitude Distribution')
+        ax8.grid(True)
 
-        plt.ioff()
-        plt.show()
+        # 9. Theta histogram
+        ax9 = plt.subplot(3, 3, 9)
+        ax9.hist(Theta, bins=50, edgecolor='black', alpha=0.7)
+        ax9.set_xlabel('Theta (rad)')
+        ax9.set_ylabel('Count')
+        ax9.set_title('Phase Distribution')
+        ax9.grid(True)
+
+        plt.tight_layout()
+
+        if params['save_file']:
+            if not os.path.exists(self.output_dir):
+                os.makedirs(self.output_dir)
+
+            img_path = os.path.join(self.output_dir, f'lockin_results_rf_{self.ref_freq}.png')
+            data = np.column_stack((R, Theta, self.all_X, self.all_Y))
+            csv_path = os.path.join(self.output_dir, f'lockin_results_rf_{self.ref_freq}.csv')
+            np.savetxt(csv_path, data, delimiter=",", header="R,Theta,X,Y", comments='', fmt='%.6f')
+            plt.savefig(img_path, dpi=150)
+        else:
+            plt.show()
 
 
 if __name__ == '__main__':
-    rp_lockin = RedPitayaLockinScope(output_dir=OUTPUT_DIR)
-    
-    # Setup reference signal and lock-in amplifier
-    rp_lockin.setup_output_and_lockin(
-        freq=WAVEFORM_FREQ,
-        amp=WAVEFORM_AMP,
-        offset=WAVEFORM_OFFSET,
-        bandwidth=LOCKIN_BANDWIDTH,
-        gain=LOCKIN_GAIN
-    )
-    
-    # Run continuous acquisition
-    rp_lockin.run_continuous(
-        time_window=TIME_WINDOW,
-        run_time=RUN_TIME,
-        update_interval=UPDATE_INTERVAL
-    )
+
+    rp = RedPitaya()
+
+    run_params = {
+        'ref_freq': 100,            # Hz, reference signal frequency for lock-in
+        'ref_amp': 0.4,             # V, amplitude of reference signal
+        'output_ref': 'out1',       # where to output the ref_signal
+
+        'timeout': 5.0,             # seconds, how long to run acquisition loop
+
+        'output_dir': 'test_data',  # where to save FFT and waveform plots
+        'save_file': False,         # whether to save plots instead of showing them
+        'fft': True,                # whether to perform FFT after run
+    }
+
+    rp.run(run_params)
+
+
