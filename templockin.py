@@ -1,8 +1,32 @@
 """
-Red Pitaya Outputs Ac Wave and Lockin Amplifier
-"""
-import math
+Red Pitaya Lock-In Amplifier
+Replaces SR7280 Lock-In Amplifier for ACV Measurements
 
+EASY ACCESS PARAMETERS - MODIFY THESE FOR YOUR EXPERIMENT
+"""
+
+# ============================================================
+# MEASUREMENT PARAMETERS - CHANGE THESE
+# ============================================================
+REF_FREQUENCY = 100         # Hz - AC excitation frequency (typical: 50-1000 Hz)
+REF_AMPLITUDE = 0.4         # V - AC signal amplitude (typical: 0.1-0.5 V)
+OUTPUT_CHANNEL = 'out1'     # 'out1' or 'out2' - where to send AC signal
+PHASE_OFFSET = 0            # degrees - phase adjustment (0, 90, 180, 270)
+
+MEASUREMENT_TIME = 5.0      # seconds - how long to measure
+AVERAGING_WINDOW = 10       # samples - moving average for noise reduction (higher = smoother)
+
+# Data saving
+SAVE_DATA = False           # True = save to files, False = just show plots
+OUTPUT_DIRECTORY = 'test_data'  # where to save results
+
+# Advanced settings (usually don't need to change)
+DECIMATION = 64             # sample rate = 125MHz/decimation (64 = good default)
+SHOW_FFT = True             # whether to compute and show FFT
+
+# ============================================================
+
+import math
 from pyrpl import Pyrpl
 import numpy as np
 from matplotlib import pyplot as plt
@@ -12,11 +36,10 @@ import os
 
 N_FFT_SHOW = 10
 
-
 class RedPitaya:
+
     electrode_map = {'A': (False, False), 'B': (True, False), 'C': (False, True), 'D': (True, True)}
-    current_range_map = {'10uA': (False, True, True, True), '100uA': (True, False, True, True),
-                         '1mA': (True, True, False, True), '10mA': (True, True, True, False)}
+    current_range_map = {'10uA': (False, True, True, True), '100uA': (True, False, True, True), '1mA': (True, True, False, True), '10mA': (True, True, True, False)}
     dac_gain_map = {'1X': (False, False), '5X': (False, True), '2X': (True, False), '10X': (True, True)}
     current_scaling_map = {'10mA': 65, '1mA': 600, '100uA': 6000, '10uA': 60000}
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
@@ -50,13 +73,13 @@ class RedPitaya:
 
         self.scope._start_acquisition_rolling_mode()
         self.scope.average = 'true'
-        self.sample_rate = 125e6 / self.scope.decimation
+        self.sample_rate = 125e6/self.scope.decimation
 
     def setup_lockin(self, params):
         self.ref_freq = params['ref_freq']
-        self.ref_period = 1 / self.ref_freq
+        self.ref_period = 1/self.ref_freq
         ref_amp = params['ref_amp']
-
+        
         # Get phase setting - can be 'auto' or a specific value in degrees
         phase_setting = params.get('phase', 0)
 
@@ -72,15 +95,15 @@ class RedPitaya:
             self.ref_sig.output_direct = 'off'
 
         self.lockin.setup(frequency=self.ref_freq,
-                          bandwidth=[-self.ref_freq * 2, -self.ref_freq, self.ref_freq, self.ref_freq * 2],  # Hz
-                          gain=1.0,
-                          phase=phase_setting,  # Use user-specified phase or 0
-                          acbandwidth=0,
-                          amplitude=ref_amp,
-                          input='in1',
-                          output_direct='out2',
-                          output_signal='output_direct',
-                          quadrature_factor=10)
+                       bandwidth=[-self.ref_freq * 2, -self.ref_freq, self.ref_freq, self.ref_freq * 2],  # Hz
+                       gain=1.0,
+                       phase=phase_setting,  # Use user-specified phase or 0
+                       acbandwidth=0,
+                       amplitude=ref_amp,
+                       input='in1',
+                       output_direct='out2',
+                       output_signal='output_direct',
+                       quadrature_factor=10)
 
     def capture_lockin(self):
         """
@@ -98,7 +121,7 @@ class RedPitaya:
         return ch1, ch2
 
     def see_fft(self):
-        iq = self.all_X + 1j * self.all_Y
+        iq = self.all_X + 1j*self.all_Y
         n_pts = len(iq)
         win = np.hanning(n_pts)
         IQwin = iq * win
@@ -118,12 +141,13 @@ class RedPitaya:
         plt.legend()
         plt.grid(True)
 
-        plt.tight_layout()
-
         # Add figure title with parameters
-        fig.suptitle(
-            f'Lock-In Amplifier Results | Freq: {self.ref_freq} Hz | Amp: {params["ref_amp"]} V | Phase: {params.get("phase", 0)}°',
-            fontsize=14, fontweight='bold', y=0.995)
+        fig.suptitle(f'Lock-In Results | {self.ref_freq} Hz, {params["ref_amp"]} V | Avg Window: {params.get("averaging_window", 1)} | SNR: {np.mean(R)/np.std(R):.2f}', 
+                     fontsize=12, fontweight='bold', y=0.995)
+        
+        # Add figure title with parameters
+        fig.suptitle(f'Lock-In Amplifier Results | Freq: {self.ref_freq} Hz | Amp: {params["ref_amp"]} V | Phase: {params.get("phase", 0)}°', 
+                     fontsize=14, fontweight='bold', y=0.995)
 
     def run(self, params):
         timeout = params['timeout']
@@ -138,6 +162,14 @@ class RedPitaya:
 
         self.all_X = np.array(np.concatenate(self.lockin_X))
         self.all_Y = np.array(np.concatenate(self.lockin_Y))
+        
+        # Apply moving average filter for more accurate measurements
+        averaging_window = params.get('averaging_window', 1)
+        if averaging_window > 1:
+            # Smooth X and Y with moving average
+            self.all_X = np.convolve(self.all_X, np.ones(averaging_window)/averaging_window, mode='valid')
+            self.all_Y = np.convolve(self.all_Y, np.ones(averaging_window)/averaging_window, mode='valid')
+        
         R = np.sqrt(self.all_X ** 2 + self.all_Y ** 2)
         Theta = np.arctan2(self.all_Y, self.all_X)
 
@@ -162,10 +194,10 @@ class RedPitaya:
         print(f"Peak Offset from 0 Hz: {abs(freqs_lock[idx]):.2f} Hz")
         print(f"Sample Rate: {self.sample_rate:.2f} Hz")
         print(f"Total Samples: {len(self.all_X)}")
-        print(f"Measurement Duration: {len(self.all_X) / self.sample_rate:.3f} seconds")
+        print(f"Measurement Duration: {len(self.all_X)/self.sample_rate:.3f} seconds")
         print("-" * 60)
         print(f"Mean R: {np.mean(R):.6f} V ± {np.std(R):.6f} V")
-        print(f"SNR (R): {np.mean(R) / np.std(R):.2f} (mean/std)")
+        print(f"SNR (R): {np.mean(R)/np.std(R):.2f} (mean/std)")
         print(f"R range: [{np.min(R):.6f}, {np.max(R):.6f}] V")
         print("-" * 60)
         print(f"Mean Theta: {np.mean(Theta):.6f} rad ± {np.std(Theta):.6f} rad")
@@ -264,16 +296,16 @@ class RedPitaya:
         else:
             X_window = self.all_X
             Y_window = self.all_Y
-
+        
         ax8.plot(X_window, Y_window, 'b-', linewidth=1.5, alpha=0.8)
         ax8.set_xlabel('X (V)')
         ax8.set_ylabel('Y (V)')
         ax8.set_title('Phasor Plot (0.1s window)')
         ax8.grid(True)
         ax8.axis('equal')
-
+        
         # Add circle to show if locked
-        max_r = np.max(np.sqrt(X_window ** 2 + Y_window ** 2))
+        max_r = np.max(np.sqrt(X_window**2 + Y_window**2))
         circle = plt.Circle((0, 0), max_r, color='gray', fill=False, linestyle='--', alpha=0.3)
         ax8.add_patch(circle)
 
@@ -291,20 +323,23 @@ class RedPitaya:
         else:
             X_mid = self.all_X[mid_start:]
             Y_mid = self.all_Y[mid_start:]
-
+        
         ax9.plot(X_mid, Y_mid, 'r-', linewidth=1.5, alpha=0.8)
         ax9.set_xlabel('X (V)')
         ax9.set_ylabel('Y (V)')
         ax9.set_title('Phasor Plot (mid 0.1s window)')
         ax9.grid(True)
         ax9.axis('equal')
-
+        
         # Add circle to show if locked
-        max_r_mid = np.max(np.sqrt(X_mid ** 2 + Y_mid ** 2))
+        max_r_mid = np.max(np.sqrt(X_mid**2 + Y_mid**2))
         circle_mid = plt.Circle((0, 0), max_r_mid, color='gray', fill=False, linestyle='--', alpha=0.3)
         ax9.add_patch(circle_mid)
 
         plt.tight_layout()
+
+                
+        plt.tight_layout(rect=[0, 0, 1, 0.99])  # Make room for title
 
         if params['save_file']:
             if not os.path.exists(self.output_dir):
@@ -320,23 +355,24 @@ class RedPitaya:
 
 
 if __name__ == '__main__':
+
     rp = RedPitaya()
 
     run_params = {
-        'ref_freq': 100,  # Hz, reference signal frequency for lock-in
-        'ref_amp': 0.4,  # V, amplitude of reference signal
-        'output_ref': 'out1',  # where to output the ref_signal
-        'phase': 0,  # Phase in degrees - try 0, 90, 180, 270 to find best circle
+        'ref_freq': 100,            # Hz, reference signal frequency for lock-in
+        'ref_amp': 0.4,             # V, amplitude of reference signal
+        'output_ref': 'out1',       # where to output the ref_signal
+        'phase': 0,                 # Phase in degrees - try 0, 90, 180, 270 to find best circle
 
-        'timeout': 5.0,  # seconds, how long to run acquisition loop
+        'timeout': 5.0,             # seconds, how long to run acquisition loop
 
         'output_dir': 'test_data',  # where to save FFT and waveform plots
-        'save_file': False,  # whether to save plots instead of showing them
-        'fft': True,  # whether to perform FFT after run
+        'save_file': False,         # whether to save plots instead of showing them
+        'fft': True,                # whether to perform FFT after run
     }
 
     # To find best phase for circular phasor plot:
     # Try running with phase = 0, 45, 90, 135, 180, 225, 270, 315
     # Pick the one that gives the cleanest circle in phasor plots
-
+    
     rp.run(run_params)
