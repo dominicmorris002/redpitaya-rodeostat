@@ -132,6 +132,27 @@ class RedPitaya:
             self.lockin_Y.append(ch2)
 
         return ch1, ch2
+    
+    def capture_raw_signals(self):
+        """
+        Capture raw input signal (in1) and reference output (asg0) for diagnostics
+        """
+        # Temporarily switch scope to raw signals
+        original_input1 = self.scope.input1
+        original_input2 = self.scope.input2
+        
+        self.scope.input1 = 'in1'  # Raw input signal
+        self.scope.input2 = 'asg0'  # Reference signal
+        
+        self.scope.single()
+        raw_input = np.array(self.scope._data_ch1_current)
+        raw_ref = np.array(self.scope._data_ch2_current)
+        
+        # Restore original scope settings
+        self.scope.input1 = original_input1
+        self.scope.input2 = original_input2
+        
+        return raw_input, raw_ref
 
     def run(self, params):
         timeout = params['timeout']
