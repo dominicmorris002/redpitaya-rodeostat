@@ -3,18 +3,17 @@ Red Pitaya Lock-In Amplifier - CORRECTED VERSION
 
 SETUP: Connect OUT1 directly to IN1 with a cable
 
+IQ MODULE OUTPUTS:
+- For iq2 module: iq2 = X (in-phase), iq2_2 = Y (quadrature)
+- For iq0 module: iq0 = X (in-phase), iq0_2 = Y (quadrature)
+- For iq1 module: iq1 = X (in-phase), iq1_2 = Y (quadrature)
+
 EXPECTED RESULTS (OUT1 → IN1, 0.4V sine @ 100Hz):
 - X ≈ 0.2V (flat line) - half of amplitude
 - Y ≈ 0V (flat line)
 - R ≈ 0.2V (flat line) - half of amplitude
 - Theta ≈ 0 rad (flat line)
 - FFT peak at 0 Hz (locked!)
-
-WHAT THE IQ MODULE DOES:
-- Generates a sine wave at your specified frequency and amplitude
-- Outputs it to OUT1 (or OUT2)
-- Demodulates whatever signal comes in on IN1
-- Gives you X (in-phase) and Y (quadrature) outputs
 """
 
 # ============================================================
@@ -82,9 +81,9 @@ class RedPitaya:
 
         print("Available scope inputs:", self.scope.inputs)
         
-        # Use iq0 and iq1 for the actual demodulated outputs
-        self.scope.input1 = 'iq1'  # In-phase (X)
-        self.scope.input2 = 'iq0'  # Quadrature (Y)
+        # CORRECTED: For iq2 module, use iq2 (X) and iq2_2 (Y)
+        self.scope.input1 = 'iq2'    # X (in-phase)
+        self.scope.input2 = 'iq2_2'  # Y (quadrature)
         self.scope.decimation = 64
         
         if self.scope.decimation not in self.allowed_decimations:
@@ -128,12 +127,13 @@ class RedPitaya:
         print(f"IQ2 output_direct: {self.lockin.output_direct} (outputs {ref_amp}V sine)")
         print(f"IQ2 amplitude: {self.lockin.amplitude} V")
         print(f"IQ2 input: {self.lockin.input}")
+        print(f"Scope reading: iq2 (X) and iq2_2 (Y)")
 
     def capture_lockin(self):
         """Captures scope data and appends to X and Y arrays"""
         self.scope.single()
-        ch1 = np.array(self.scope._data_ch1_current)  # iq1 = X (in-phase)
-        ch2 = np.array(self.scope._data_ch2_current)  # iq0 = Y (quadrature)
+        ch1 = np.array(self.scope._data_ch1_current)  # iq2 = X (in-phase)
+        ch2 = np.array(self.scope._data_ch2_current)  # iq2_2 = Y (quadrature)
         
         self.lockin_X.append(ch1)
         self.lockin_Y.append(ch2)
@@ -197,8 +197,8 @@ class RedPitaya:
         t_raw = np.arange(len(out1_raw)) / self.sample_rate
         
         # Switch back to lock-in outputs
-        self.scope.input1 = 'iq1'
-        self.scope.input2 = 'iq0'
+        self.scope.input1 = 'iq2'
+        self.scope.input2 = 'iq2_2'
         
         # FFT calculations
         iq = self.all_X + 1j * self.all_Y
@@ -300,7 +300,7 @@ class RedPitaya:
                    label=f'Mean: {np.mean(self.all_X):.4f}V')
         ax4.set_xlabel('Time (s)')
         ax4.set_ylabel('X (V)')
-        ax4.set_title('In-phase (X) vs Time')
+        ax4.set_title('In-phase (X) vs Time [iq2]')
         ax4.legend()
         ax4.grid(True)
         
@@ -311,7 +311,7 @@ class RedPitaya:
                    label=f'Mean: {np.mean(self.all_Y):.4f}V')
         ax5.set_xlabel('Time (s)')
         ax5.set_ylabel('Y (V)')
-        ax5.set_title('Quadrature (Y) vs Time')
+        ax5.set_title('Quadrature (Y) vs Time [iq2_2]')
         ax5.legend()
         ax5.grid(True)
         
