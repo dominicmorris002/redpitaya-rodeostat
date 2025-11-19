@@ -3,12 +3,8 @@ Red Pitaya Lock-In Amplifier - CORRECTED VERSION
 
 SETUP: Connect OUT1 directly to IN1 with a cable
 
-EXPECTED RESULTS (OUT1 → IN1, 0.4V sine @ 100Hz):
-- X ≈ 0.2V (flat line) - half of amplitude
-- Y ≈ 0V (flat line)
-- R ≈ 0.2V (flat line) - half of amplitude
-- Theta ≈ 0 rad (flat line)
-- FFT peak at 0 Hz (locked!)
+The IQ module demodulated outputs (X and Y) are NOT available as scope inputs!
+We must read them directly from the IQ module's internal registers.
 """
 
 # ============================================================
@@ -75,12 +71,13 @@ class RedPitaya:
         self.all_X = []
         self.lockin_Y = []
         self.all_Y = []
+        self.timestamps = []
 
         print("Available scope inputs:", self.scope.inputs)
         
-        # Use iq2 (X) and iq2_2 (Y) for lock-in outputs
-        self.scope.input1 = 'iq2'    # X (in-phase)
-        self.scope.input2 = 'iq2_2'  # Y (quadrature)
+        # Setup scope to view raw signals
+        self.scope.input1 = 'out1'   # Reference from ASG
+        self.scope.input2 = 'in1'    # Input signal
         self.scope.decimation = DECIMATION
         self.scope.duration = 0.01
         self.scope.average = False
@@ -91,8 +88,8 @@ class RedPitaya:
             print('Invalid decimation')
             exit()
         
-        self.sample_rate = 125e6 / self.scope.decimation
-        print(f"Scope sample rate: {self.sample_rate:.2f} Hz")
+        self.sample_rate = 50  # We'll sample at ~50 Hz from IQ module registers
+        print(f"Lock-in sample rate: {self.sample_rate:.2f} Hz")
 
     def create_yaml(self):
         """Create YAML config file similar to working example"""
@@ -103,8 +100,8 @@ class RedPitaya:
                 'scope': {
                     'ch1_active': True,
                     'ch2_active': True,
-                    'input1': 'iq2',
-                    'input2': 'iq2_2',
+                    'input1': 'out1',
+                    'input2': 'in1',
                     'threshold': 0.0,
                     'hysteresis': 0.0,
                     'duration': 0.01,
@@ -180,42 +177,28 @@ class RedPitaya:
         print(f"Filter BW: {filter_bw} Hz")
         print(f"IQ2 input: {self.lockin.input}")
         print(f"IQ2 output_direct: {self.lockin.output_direct} (should be 'off')")
-        print(f"Scope reading: iq2 (X) and iq2_2 (Y)")
+        print("Reading X and Y directly from IQ module registers")
 
     def capture_lockin(self):
-        """Captures scope data and appends to X and Y arrays"""
+        """Read X and Y directly from IQ module registers"""
         try:
-            ch1 = np.array(self.scope._data_ch1)  # iq2 = X (in-phase)
-            ch2 = np.array(self.scope._data_ch2)  # iq2_2 = Y (quadrature)
+            # Access the quadrature values directly from the IQ module
+            # These are the actual demodulated outputs!
+            data = self.lockin._nadata()
             
-            if ch1.size > 0 and ch2.size > 0:
-                self.lockin_X.append(ch1)
-                self.lockin_Y.append(ch2)
-                return ch1, ch2
+            if data is not None and len(data) == 2:
+                X_value = data[0]  # In-phase
+                Y_value = data[1]  # Quadrature
+                
+                self.lockin_X.append(X_value)
+                self.lockin_Y.append(Y_value)
+                self.timestamps.append(time.time())
+                return X_value, Y_value
             else:
                 return None, None
         except Exception as e:
             print(f"⚠️ Error during capture: {e}")
             return None, None
-
-    def see_fft(self):
-        iq = self.all_X + 1j * self.all_Y
-        n_pts = len(iq)
-        win = np.hanning(n_pts)
-        IQwin = iq * win
-        IQfft = np.fft.fftshift(np.fft.fft(IQwin))
-        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / self.sample_rate))
-        psd_lock = (np.abs(IQfft) ** 2) / (self.sample_rate * np.sum(win ** 2))
-        idx = np.argmax(psd_lock)
-        print("Peak at", freqs_lock[idx], "Hz")
-        
-        plt.figure(1, figsize=(12, 4))
-        plt.semilogy(freqs_lock, psd_lock, label='Lock-in R')
-        plt.xlabel('Frequency (Hz)')
-        plt.ylabel('Power (a.u.)')
-        plt.title('Lock-in Output Spectrum (baseband)')
-        plt.legend()
-        plt.grid(True)
 
     def run(self, params):
         timeout = params['timeout']
@@ -228,15 +211,15 @@ class RedPitaya:
         loop_start = time.time()
         capture_count = 0
         while (time.time() - loop_start) < timeout:
-            ch1, ch2 = self.capture_lockin()
-            if ch1 is not None:
+            X, Y = self.capture_lockin()
+            if X is not None:
                 capture_count += 1
-            time.sleep(0.05)  # ~20 Hz capture rate
+            time.sleep(0.02)  # ~50 Hz capture rate
         
-        print(f"Captured {capture_count} frames")
+        print(f"Captured {capture_count} samples")
         
-        self.all_X = np.array(np.concatenate(self.lockin_X))
-        self.all_Y = np.array(np.concatenate(self.lockin_Y))
+        self.all_X = np.array(self.lockin_X)
+        self.all_Y = np.array(self.lockin_Y)
         
         print(f"Total X samples: {len(self.all_X)}")
         print(f"Total Y samples: {len(self.all_Y)}")
@@ -253,19 +236,13 @@ class RedPitaya:
         Theta = np.arctan2(self.all_Y, self.all_X)
         
         # Time array
-        t = np.arange(start=0, stop=len(self.all_X) / self.sample_rate, step=1 / self.sample_rate)
+        t = np.arange(len(self.all_X)) / self.sample_rate
         
         # Capture raw signals for plotting
-        self.scope.input1 = 'out1'  # Reference signal from ASG0
-        self.scope.input2 = 'in1'   # Input signal
-        time.sleep(0.1)
         out1_raw = np.array(self.scope._data_ch1)
         in1_raw = np.array(self.scope._data_ch2)
-        t_raw = np.arange(len(out1_raw)) / self.sample_rate
-        
-        # Switch back to lock-in outputs
-        self.scope.input1 = 'iq2'
-        self.scope.input2 = 'iq2_2'
+        scope_sample_rate = 125e6 / self.scope.decimation
+        t_raw = np.arange(len(out1_raw)) / scope_sample_rate
         
         # FFT calculations
         iq = self.all_X + 1j * self.all_Y
@@ -334,7 +311,7 @@ class RedPitaya:
         # 1. OUT1 (Reference Signal from ASG0)
         ax1 = plt.subplot(3, 3, 1)
         n_periods = 5
-        n_samples_plot = int(n_periods * self.sample_rate / self.ref_freq)
+        n_samples_plot = int(n_periods * scope_sample_rate / self.ref_freq)
         n_samples_plot = min(n_samples_plot, len(out1_raw))
         ax1.plot(t_raw[:n_samples_plot] * 1000, out1_raw[:n_samples_plot], 'b-', linewidth=1)
         ax1.set_xlabel('Time (ms)')
@@ -367,7 +344,7 @@ class RedPitaya:
                    label=f'Mean: {np.mean(self.all_X):.4f}V')
         ax4.set_xlabel('Time (s)')
         ax4.set_ylabel('X (V)')
-        ax4.set_title('In-phase (X) vs Time [iq2]')
+        ax4.set_title('In-phase (X) vs Time')
         ax4.legend()
         ax4.grid(True)
         
@@ -378,13 +355,13 @@ class RedPitaya:
                    label=f'Mean: {np.mean(self.all_Y):.4f}V')
         ax5.set_xlabel('Time (s)')
         ax5.set_ylabel('Y (V)')
-        ax5.set_title('Quadrature (Y) vs Time [iq2_2]')
+        ax5.set_title('Quadrature (Y) vs Time')
         ax5.legend()
         ax5.grid(True)
         
         # 6. X vs Y (IQ plot)
         ax6 = plt.subplot(3, 3, 6)
-        ax6.plot(self.all_X, self.all_Y, 'g.', markersize=1, alpha=0.5)
+        ax6.plot(self.all_X, self.all_Y, 'g.', markersize=2, alpha=0.5)
         ax6.plot(np.mean(self.all_X), np.mean(self.all_Y), 'r+', markersize=15, 
                 markeredgewidth=2, label='Mean')
         ax6.set_xlabel('X (V)')
@@ -418,7 +395,7 @@ class RedPitaya:
         
         # 9. R vs Theta
         ax9 = plt.subplot(3, 3, 9)
-        ax9.plot(Theta, R, 'purple', marker='.', markersize=1, linestyle='', alpha=0.5)
+        ax9.plot(Theta, R, 'purple', marker='.', markersize=2, linestyle='', alpha=0.5)
         ax9.axhline(np.mean(R), color='b', linestyle='--', alpha=0.5)
         ax9.axvline(np.mean(Theta), color='r', linestyle='--', alpha=0.5)
         ax9.set_xlabel('Theta (rad)')
