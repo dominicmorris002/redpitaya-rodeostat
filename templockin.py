@@ -3,11 +3,6 @@ Red Pitaya Lock-In Amplifier - CORRECTED VERSION
 
 SETUP: Connect OUT1 directly to IN1 with a cable
 
-IQ MODULE OUTPUTS:
-- For iq2 module: iq2 = X (in-phase), iq2_2 = Y (quadrature)
-- For iq0 module: iq0 = X (in-phase), iq0_2 = Y (quadrature)
-- For iq1 module: iq1 = X (in-phase), iq1_2 = Y (quadrature)
-
 EXPECTED RESULTS (OUT1 → IN1, 0.4V sine @ 100Hz):
 - X ≈ 0.2V (flat line) - half of amplitude
 - Y ≈ 0V (flat line)
@@ -38,6 +33,10 @@ OUTPUT_DIRECTORY = 'test_data'
 # Advanced settings
 DECIMATION = 64
 SHOW_FFT = True
+
+# Red Pitaya connection
+HOSTNAME = 'rp-f073ce.local'
+YAML_FILE = 'lockin_scope_config.yml'
 # ============================================================
 
 import math
@@ -47,52 +46,112 @@ from matplotlib import pyplot as plt
 import time
 import csv
 import os
+import yaml
 
 N_FFT_SHOW = 10
 
 class RedPitaya:
-    electrode_map = {'A': (False, False), 'B': (True, False), 
-                     'C': (False, True), 'D': (True, True)}
-    current_range_map = {'10uA': (False, True, True, True),
-                        '100uA': (True, False, True, True),
-                        '1mA': (True, True, False, True),
-                        '10mA': (True, True, True, False)}
-    dac_gain_map = {'1X': (False, False), '5X': (False, True),
-                   '2X': (True, False), '10X': (True, True)}
-    current_scaling_map = {'10mA': 65, '1mA': 600, '100uA': 6000, '10uA': 60000}
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
-    def __init__(self, output_dir='test_data'):
-        self.rp = Pyrpl(config='lockin_config', hostname='rp-f073ce.local')
+    def __init__(self, output_dir='test_data', yaml_file=YAML_FILE):
         self.output_dir = output_dir
+        self.yaml_file = yaml_file
+        
+        # Create YAML config first
+        self.create_yaml()
+        
+        # Connect to RedPitaya with proper modules
+        self.rp = Pyrpl(config=self.yaml_file, hostname=HOSTNAME)
         self.rp_modules = self.rp.rp
+        
+        # Get modules
         self.lockin = self.rp_modules.iq2
-        self.ref_sig = self.rp_modules.asg0
+        self.asg = self.rp_modules.asg0
+        self.scope = self.rp_modules.scope
+        self.pid = self.rp_modules.pid0
+        
         self.ref_start_t = 0.0
         self.lockin_X = []
         self.all_X = []
         self.lockin_Y = []
         self.all_Y = []
-        self.pid = self.rp_modules.pid0
-        self.kp = self.pid.p
-        self.ki = self.pid.i
-        self.ival = self.pid.ival
-        self.scope = self.rp_modules.scope
 
         print("Available scope inputs:", self.scope.inputs)
         
-        # CORRECTED: For iq2 module, use iq2 (X) and iq2_2 (Y)
+        # Use iq2 (X) and iq2_2 (Y) for lock-in outputs
         self.scope.input1 = 'iq2'    # X (in-phase)
         self.scope.input2 = 'iq2_2'  # Y (quadrature)
-        self.scope.decimation = 64
+        self.scope.decimation = DECIMATION
+        self.scope.duration = 0.01
+        self.scope.average = False
+        self.scope.trigger_source = 'immediately'
+        self.scope.running_state = 'running_continuous'
         
         if self.scope.decimation not in self.allowed_decimations:
             print('Invalid decimation')
             exit()
         
-        self.scope._start_acquisition_rolling_mode()
-        self.scope.average = 'true'
         self.sample_rate = 125e6 / self.scope.decimation
+        print(f"Scope sample rate: {self.sample_rate:.2f} Hz")
+
+    def create_yaml(self):
+        """Create YAML config file similar to working example"""
+        if not os.path.exists(self.yaml_file):
+            config = {
+                'redpitaya_hostname': HOSTNAME,
+                'modules': ['scope', 'asg0', 'iq2'],
+                'scope': {
+                    'ch1_active': True,
+                    'ch2_active': True,
+                    'input1': 'iq2',
+                    'input2': 'iq2_2',
+                    'threshold': 0.0,
+                    'hysteresis': 0.0,
+                    'duration': 0.01,
+                    'trigger_delay': 0.0,
+                    'trigger_source': 'immediately',
+                    'running_state': 'running_continuous',
+                    'average': False,
+                    'decimation': DECIMATION
+                },
+                'asg0': {
+                    'waveform': 'sin',
+                    'frequency': REF_FREQUENCY,
+                    'amplitude': REF_AMPLITUDE,
+                    'offset': 0.0,
+                    'output_direct': OUTPUT_CHANNEL,
+                    'trigger_source': 'immediately'
+                },
+                'iq2': {
+                    'input': 'in1',
+                    'frequency': REF_FREQUENCY,
+                    'bandwidth': FILTER_BANDWIDTH,
+                    'gain': 0.0,
+                    'phase': PHASE_OFFSET,
+                    'acbandwidth': 0,
+                    'amplitude': 0.0,
+                    'output_direct': 'off',
+                    'output_signal': 'quadrature',
+                    'quadrature_factor': 1
+                }
+            }
+            with open(self.yaml_file, 'w') as f:
+                yaml.dump(config, f)
+            print(f"Created YAML: {self.yaml_file}")
+        else:
+            print(f"YAML exists: {self.yaml_file}")
+
+    def setup_output(self, freq, amp, offset=0.0):
+        """Setup ASG0 output - same as working example"""
+        self.asg.setup(
+            waveform='sin',
+            frequency=freq,
+            amplitude=amp,
+            offset=offset,
+            output_direct=OUTPUT_CHANNEL,
+            trigger_source='immediately'
+        )
+        print(f"🔊 ASG0 Output: {freq} Hz, {amp} V, Offset: {offset} V on {OUTPUT_CHANNEL}")
 
     def setup_lockin(self, params):
         self.ref_freq = params['ref_freq']
@@ -101,43 +160,43 @@ class RedPitaya:
         filter_bw = params.get('filter_bandwidth', 10)
         phase_setting = params.get('phase', 0)
         
-        # CRITICAL: Turn OFF ASG0 - we don't need it!
-        # The IQ module will generate and output the reference signal
-        self.ref_sig.output_direct = 'off'
-        print("ASG0 disabled - IQ module will generate reference")
+        # Setup ASG0 to output reference signal (like the working example)
+        self.setup_output(freq=self.ref_freq, amp=ref_amp, offset=0.0)
         
-        # IQ MODULE DOES EVERYTHING:
-        # - Generates sine wave at ref_freq with amplitude ref_amp
-        # - Outputs it to OUT1 (or OUT2)
-        # - Demodulates signal from IN1
+        # Setup IQ2 for demodulation ONLY (no output)
         self.lockin.setup(
             frequency=self.ref_freq,
             bandwidth=filter_bw,
             gain=0.0,              # No feedback
             phase=phase_setting,
             acbandwidth=0,         # DC-coupled input
-            amplitude=ref_amp,     # THIS IS THE OUTPUT AMPLITUDE!
+            amplitude=0.0,         # NO OUTPUT from IQ module
             input='in1',
-            output_direct=params['output_ref'],  # Send sine wave to OUT1/OUT2
+            output_direct='off',   # IQ module outputs NOTHING
             output_signal='quadrature',
             quadrature_factor=1)   # No extra gain
         
-        print(f"Lock-in setup: {self.ref_freq} Hz, Amplitude: {ref_amp}V")
+        print(f"Lock-in demodulation setup: {self.ref_freq} Hz")
         print(f"Filter BW: {filter_bw} Hz")
-        print(f"IQ2 output_direct: {self.lockin.output_direct} (outputs {ref_amp}V sine)")
-        print(f"IQ2 amplitude: {self.lockin.amplitude} V")
         print(f"IQ2 input: {self.lockin.input}")
+        print(f"IQ2 output_direct: {self.lockin.output_direct} (should be 'off')")
         print(f"Scope reading: iq2 (X) and iq2_2 (Y)")
 
     def capture_lockin(self):
         """Captures scope data and appends to X and Y arrays"""
-        self.scope.single()
-        ch1 = np.array(self.scope._data_ch1_current)  # iq2 = X (in-phase)
-        ch2 = np.array(self.scope._data_ch2_current)  # iq2_2 = Y (quadrature)
-        
-        self.lockin_X.append(ch1)
-        self.lockin_Y.append(ch2)
-        return ch1, ch2
+        try:
+            ch1 = np.array(self.scope._data_ch1)  # iq2 = X (in-phase)
+            ch2 = np.array(self.scope._data_ch2)  # iq2_2 = Y (quadrature)
+            
+            if ch1.size > 0 and ch2.size > 0:
+                self.lockin_X.append(ch1)
+                self.lockin_Y.append(ch2)
+                return ch1, ch2
+            else:
+                return None, None
+        except Exception as e:
+            print(f"⚠️ Error during capture: {e}")
+            return None, None
 
     def see_fft(self):
         iq = self.all_X + 1j * self.all_Y
@@ -164,14 +223,23 @@ class RedPitaya:
         
         # Let the lock-in settle
         print("Waiting for lock-in to settle...")
-        time.sleep(0.5)
+        time.sleep(1.0)  # Give it time to stabilize
         
         loop_start = time.time()
+        capture_count = 0
         while (time.time() - loop_start) < timeout:
-            self.capture_lockin()
+            ch1, ch2 = self.capture_lockin()
+            if ch1 is not None:
+                capture_count += 1
+            time.sleep(0.05)  # ~20 Hz capture rate
+        
+        print(f"Captured {capture_count} frames")
         
         self.all_X = np.array(np.concatenate(self.lockin_X))
         self.all_Y = np.array(np.concatenate(self.lockin_Y))
+        
+        print(f"Total X samples: {len(self.all_X)}")
+        print(f"Total Y samples: {len(self.all_Y)}")
         
         # Apply moving average filter
         averaging_window = params.get('averaging_window', 1)
@@ -188,12 +256,11 @@ class RedPitaya:
         t = np.arange(start=0, stop=len(self.all_X) / self.sample_rate, step=1 / self.sample_rate)
         
         # Capture raw signals for plotting
-        self.scope.input1 = 'out1'  # Reference signal from IQ module
+        self.scope.input1 = 'out1'  # Reference signal from ASG0
         self.scope.input2 = 'in1'   # Input signal
-        time.sleep(0.05)
-        self.scope.single()
-        out1_raw = np.array(self.scope._data_ch1_current)
-        in1_raw = np.array(self.scope._data_ch2_current)
+        time.sleep(0.1)
+        out1_raw = np.array(self.scope._data_ch1)
+        in1_raw = np.array(self.scope._data_ch2)
         t_raw = np.arange(len(out1_raw)) / self.sample_rate
         
         # Switch back to lock-in outputs
@@ -264,7 +331,7 @@ class RedPitaya:
         # Create comprehensive plot
         fig = plt.figure(figsize=(16, 10))
         
-        # 1. OUT1 (Reference Signal)
+        # 1. OUT1 (Reference Signal from ASG0)
         ax1 = plt.subplot(3, 3, 1)
         n_periods = 5
         n_samples_plot = int(n_periods * self.sample_rate / self.ref_freq)
@@ -272,7 +339,7 @@ class RedPitaya:
         ax1.plot(t_raw[:n_samples_plot] * 1000, out1_raw[:n_samples_plot], 'b-', linewidth=1)
         ax1.set_xlabel('Time (ms)')
         ax1.set_ylabel('OUT1 (V)')
-        ax1.set_title(f'Reference Signal (OUT1) @ {self.ref_freq} Hz')
+        ax1.set_title(f'Reference Signal (OUT1 from ASG0) @ {self.ref_freq} Hz')
         ax1.grid(True)
         
         # 2. IN1 (Input Signal)
@@ -374,7 +441,7 @@ class RedPitaya:
 
 
 if __name__ == '__main__':
-    rp = RedPitaya()
+    rp = RedPitaya(output_dir=OUTPUT_DIRECTORY, yaml_file=YAML_FILE)
     
     run_params = {
         'ref_freq': REF_FREQUENCY,
