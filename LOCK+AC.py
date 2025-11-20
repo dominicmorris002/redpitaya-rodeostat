@@ -1,63 +1,43 @@
 """
-Red Pitaya Lock-In Amplifier - FULLY CORRECTED VERSION
+Red Pitaya Lock-In Amplifier - CORRECTED VERSION
 
-EXPECTED RESULTS (OUT1 → IN1, 1V sine @ 100Hz):
-- X ≈ 0.5V (flat line)
+SETUP: Connect OUT1 directly to IN1 with a cable
+
+IQ MODULE OUTPUTS:
+- For iq2 module: iq2 = X (in-phase), iq2_2 = Y (quadrature)
+- For iq0 module: iq0 = X (in-phase), iq0_2 = Y (quadrature)
+- For iq1 module: iq1 = X (in-phase), iq1_2 = Y (quadrature)
+
+EXPECTED RESULTS (OUT1 → IN1, 0.4V sine @ 100Hz):
+- X ≈ 0.2V (flat line) - half of amplitude
 - Y ≈ 0V (flat line)
-- R ≈ 0.5V (flat line)
+- R ≈ 0.2V (flat line) - half of amplitude
 - Theta ≈ 0 rad (flat line)
-- FFT peak at 0 Hz
-
-OSCILLOSCOPE CHECKS (for debugging):
-- OUT1: sine wave (your reference from ASG0)
-- OUT2: should be OFF (no signal)
-- IN1: sine wave (same as OUT1 if directly connected)
-- iq2: sine wave (this is the IQ module's internal sine reference - NOT a demodulated output!)
-- iq2_2: sine wave (this is the IQ module's internal cosine reference - NOT a demodulated output!)
-- iq0: This is quadrature output Q (use for scope viewing)
-- iq1: This is in-phase output I (use for scope viewing)
-
-CRITICAL FIX: The IQ module has FOUR outputs per module:
-- iq0, iq1, iq2, iq2_2 are NOT the demodulated X and Y!
-- The actual scope signals depend on which IQ module (iq0, iq1, iq2) you're using
-- For iq2 module: Check the available scope input names to find actual quadrature outputs
-
-TROUBLESHOOTING:
-- If FFT peak is NOT at 0 Hz: Lock-in frequency doesn't match signal frequency
-- If X oscillates wildly: Try different PHASE_OFFSET values (0, 90, 180, 270)
-- If R is wrong: Check that IN1 is actually receiving the signal
-- If OUT2 has a signal: output_direct should be 'off'
-- Start with AVERAGING_WINDOW = 1 to see raw lock-in output first
+- FFT peak at 0 Hz (locked!)
 """
 
 # ============================================================
 # MEASUREMENT PARAMETERS - CHANGE THESE
 # ============================================================
-REF_FREQUENCY = 100  # Hz - AC excitation frequency (typical: 50-1000 Hz)
-REF_AMPLITUDE = 1  # V - AC signal amplitude (typical: 0.1-0.5 V)
-OUTPUT_CHANNEL = 'out1'  # 'out1' or 'out2' - where to send AC signal
-PHASE_OFFSET = 0  # degrees - phase adjustment (0, 90, 180, 270)
-MEASUREMENT_TIME = 5.0  # seconds - how long to measure (longer = more accurate)
+REF_FREQUENCY = 100        # Hz - AC excitation frequency
+REF_AMPLITUDE = 2        # V - AC signal amplitude (will appear on OUT1)
+OUTPUT_CHANNEL = 'out1'    # 'out1' or 'out2' - where to send AC signal
+PHASE_OFFSET = 0           # degrees - phase adjustment (0, 90, 180, 270)
+MEASUREMENT_TIME = 5.0     # seconds - how long to measure
 
-# LOCK-IN FILTER BANDWIDTH - THIS IS CRITICAL!
-# Narrower = cleaner signal but slower response
-# For 1V sin wave at 100Hz, expect: X=0.5V, Y=0V, R=0.5V, Theta=0
-FILTER_BANDWIDTH = 10  # Hz - INCREASED from 2 to 10 for faster settling
-# Try: 1 Hz (very clean, slow), 10 Hz (good balance), 50 Hz (fast)
+# LOCK-IN FILTER BANDWIDTH
+FILTER_BANDWIDTH = 10      # Hz - lower = cleaner, higher = faster response
 
-AVERAGING_WINDOW = 1  # samples - moving average for noise reduction
-# HIGHER = MORE ACCURATE but slower response
-# For science: 50-100, For testing: 10, For fast response: 1
-# NOTE: Start with 1 (no averaging) to see if lock-in is working first!
+# AVERAGING
+AVERAGING_WINDOW = 1       # samples - set to 1 to see raw lock-in output first
 
 # Data saving
-SAVE_DATA = False  # True = save to files, False = just show plots
-OUTPUT_DIRECTORY = 'test_data'  # where to save results
+SAVE_DATA = False          # True = save to files, False = just show plots
+OUTPUT_DIRECTORY = 'test_data'
 
-# Advanced settings (usually don't need to change)
-DECIMATION = 64  # sample rate = 125MHz/decimation (64 = good default)
-SHOW_FFT = True  # whether to compute and show FFT
-
+# Advanced settings
+DECIMATION = 64
+SHOW_FFT = True
 # ============================================================
 
 import math
@@ -70,19 +50,21 @@ import os
 
 N_FFT_SHOW = 10
 
-
 class RedPitaya:
-    electrode_map = {'A': (False, False), 'B': (True, False), 'C': (False, True), 'D': (True, True)}
-    current_range_map = {'10uA': (False, True, True, True), '100uA': (True, False, True, True),
-                         '1mA': (True, True, False, True), '10mA': (True, True, True, False)}
-    dac_gain_map = {'1X': (False, False), '5X': (False, True), '2X': (True, False), '10X': (True, True)}
+    electrode_map = {'A': (False, False), 'B': (True, False),
+                     'C': (False, True), 'D': (True, True)}
+    current_range_map = {'10uA': (False, True, True, True),
+                        '100uA': (True, False, True, True),
+                        '1mA': (True, True, False, True),
+                        '10mA': (True, True, True, False)}
+    dac_gain_map = {'1X': (False, False), '5X': (False, True),
+                   '2X': (True, False), '10X': (True, True)}
     current_scaling_map = {'10mA': 65, '1mA': 600, '100uA': 6000, '10uA': 60000}
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
     def __init__(self, output_dir='test_data'):
         self.rp = Pyrpl(config='lockin_config', hostname='rp-f073ce.local')
         self.output_dir = output_dir
-
         self.rp_modules = self.rp.rp
         self.lockin = self.rp_modules.iq2
         self.ref_sig = self.rp_modules.asg0
@@ -91,23 +73,17 @@ class RedPitaya:
         self.all_X = []
         self.lockin_Y = []
         self.all_Y = []
-
         self.pid = self.rp_modules.pid0
         self.kp = self.pid.p
         self.ki = self.pid.i
         self.ival = self.pid.ival
-
         self.scope = self.rp_modules.scope
 
-        # CRITICAL: Need to identify the correct quadrature output signals
-        # Print available scope inputs to see what's available
         print("Available scope inputs:", self.scope.inputs)
 
-        # According to pyrpl docs, the quadrature outputs for iq2 should be accessible
-        # Try to use the actual quadrature signals, not the internal sine/cosine references
-        self.scope.input1 = 'iq2'  # This should be one quadrature
-        self.scope.input2 = 'iq2_2'  # This should be the other quadrature
-
+        # CORRECTED: For iq2 module, use iq2 (X) and iq2_2 (Y)
+        self.scope.input1 = 'iq2'    # X (in-phase)
+        self.scope.input2 = 'iq2_2'  # Y (quadrature)
         self.scope.decimation = 64
 
         if self.scope.decimation not in self.allowed_decimations:
@@ -122,53 +98,45 @@ class RedPitaya:
         self.ref_freq = params['ref_freq']
         self.ref_period = 1 / self.ref_freq
         ref_amp = params['ref_amp']
-        filter_bw = params.get('filter_bandwidth', 10)  # Increased default
-
-        # Get phase setting - can be 'auto' or a specific value in degrees
+        filter_bw = params.get('filter_bandwidth', 10)
         phase_setting = params.get('phase', 0)
 
-        self.ref_sig.setup(waveform='sin',
-                           amplitude=ref_amp,
-                           frequency=self.ref_freq)
+        # CRITICAL: Turn OFF ASG0 - we don't need it!
+        # The IQ module will generate and output the reference signal
+        self.ref_sig.output_direct = 'off'
+        print("ASG0 disabled - IQ module will generate reference")
 
-        self.ref_start_t = time.time()
+        # IQ MODULE DOES EVERYTHING:
+        # - Generates sine wave at ref_freq with amplitude ref_amp
+        # - Outputs it to OUT1 (or OUT2)
+        # - Demodulates signal from IN1
+        self.lockin.setup(
+            frequency=self.ref_freq,
+            bandwidth=filter_bw,
+            gain=0.0,              # No feedback
+            phase=phase_setting,
+            acbandwidth=0,         # DC-coupled input
+            amplitude=ref_amp,     # THIS IS THE OUTPUT AMPLITUDE!
+            input='in1',
+            output_direct=params['output_ref'],  # Send sine wave to OUT1/OUT2
+            output_signal='quadrature',
+            quadrature_factor=1)   # No extra gain
 
-        if params['output_ref'] == 'out1' or params['output_ref'] == 'out2':
-            self.ref_sig.output_direct = params['output_ref']
-        else:
-            self.ref_sig.output_direct = 'off'
-
-        # CRITICAL FIXES:
-        # 1. output_direct should be 'off' - we don't want IQ2 sending anything to analog outputs
-        # 2. bandwidth should be wider for faster settling
-        self.lockin.setup(frequency=self.ref_freq,
-                          bandwidth=filter_bw,  # Single value, not list (pyrpl will make it symmetric)
-                          gain=0.0,  # IMPORTANT: gain=0 means no feedback from demod to mod
-                          phase=phase_setting,
-                          acbandwidth=0,  # Set to 0 to disable high-pass (for DC-coupled input)
-                          amplitude=0,  # IMPORTANT: amplitude=0 means no modulation output
-                          input='in1',
-                          output_direct='off',  # CRITICAL: Don't send anything to OUT2!
-                          output_signal='quadrature',  # Make quadratures available
-                          quadrature_factor=1)  # CRITICAL: 1 = no amplification (was 10 = 10x gain!)
-
-        print(f"Lock-in setup: {self.ref_freq} Hz, Filter BW: {filter_bw} Hz")
-        print(f"IQ2 output_direct: {self.lockin.output_direct} (should be 'off')")
-        print(f"IQ2 amplitude: {self.lockin.amplitude} (should be 0)")
-        print(f"IQ2 quadrature_factor: {self.lockin.quadrature_factor} (should be 1 for no gain)")
+        print(f"Lock-in setup: {self.ref_freq} Hz, Amplitude: {ref_amp}V")
+        print(f"Filter BW: {filter_bw} Hz")
+        print(f"IQ2 output_direct: {self.lockin.output_direct} (outputs {ref_amp}V sine)")
+        print(f"IQ2 amplitude: {self.lockin.amplitude} V")
+        print(f"IQ2 input: {self.lockin.input}")
+        print(f"Scope reading: iq2 (X) and iq2_2 (Y)")
 
     def capture_lockin(self):
-        """
-        Captures scope data and appends to X and Y arrays
-        """
+        """Captures scope data and appends to X and Y arrays"""
         self.scope.single()
-        ch1 = np.array(self.scope._data_ch1_current)
-        ch2 = np.array(self.scope._data_ch2_current)
+        ch1 = np.array(self.scope._data_ch1_current)  # iq2 = X (in-phase)
+        ch2 = np.array(self.scope._data_ch2_current)  # iq2_2 = Y (quadrature)
 
-        # Append data - we'll figure out which is X and which is Y from the results
         self.lockin_X.append(ch1)
         self.lockin_Y.append(ch2)
-
         return ch1, ch2
 
     def see_fft(self):
@@ -179,12 +147,10 @@ class RedPitaya:
         IQfft = np.fft.fftshift(np.fft.fft(IQwin))
         freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / self.sample_rate))
         psd_lock = (np.abs(IQfft) ** 2) / (self.sample_rate * np.sum(win ** 2))
-
         idx = np.argmax(psd_lock)
         print("Peak at", freqs_lock[idx], "Hz")
 
         plt.figure(1, figsize=(12, 4))
-
         plt.semilogy(freqs_lock, psd_lock, label='Lock-in R')
         plt.xlabel('Frequency (Hz)')
         plt.ylabel('Power (a.u.)')
@@ -194,41 +160,23 @@ class RedPitaya:
 
     def run(self, params):
         timeout = params['timeout']
-
         self.setup_lockin(params)
 
-        # Let the lock-in settle before starting acquisition
+        # Let the lock-in settle
         print("Waiting for lock-in to settle...")
-        time.sleep(0.5)  # Increased settling time
+        time.sleep(0.5)
 
         loop_start = time.time()
-
         while (time.time() - loop_start) < timeout:
             self.capture_lockin()
 
         self.all_X = np.array(np.concatenate(self.lockin_X))
         self.all_Y = np.array(np.concatenate(self.lockin_Y))
 
-        # Check if we need to swap X and Y based on which has larger oscillations
-        # The one oscillating at 100Hz is probably wrong!
-        X_fft = np.fft.rfft(self.all_X)
-        Y_fft = np.fft.rfft(self.all_Y)
-        X_peak = np.max(np.abs(X_fft[1:]))  # Ignore DC
-        Y_peak = np.max(np.abs(Y_fft[1:]))
-
-        if X_peak > Y_peak * 2:  # X is oscillating much more than Y
-            print("WARNING: Swapping X and Y - X was oscillating!")
-            self.all_X, self.all_Y = self.all_Y, self.all_X
-
-        # Apply moving average filter for more accurate measurements
+        # Apply moving average filter
         averaging_window = params.get('averaging_window', 1)
 
-        # Store unfiltered data for diagnostics
-        X_raw = self.all_X
-        Y_raw = self.all_Y
-
         if averaging_window > 1:
-            # Smooth X and Y with moving average
             self.all_X = np.convolve(self.all_X, np.ones(averaging_window) / averaging_window, mode='valid')
             self.all_Y = np.convolve(self.all_Y, np.ones(averaging_window) / averaging_window, mode='valid')
             print(f"Applied {averaging_window}-sample moving average filter")
@@ -240,11 +188,8 @@ class RedPitaya:
         t = np.arange(start=0, stop=len(self.all_X) / self.sample_rate, step=1 / self.sample_rate)
 
         # Capture raw signals for plotting
-        scope_backup_in1 = self.scope.input1
-        scope_backup_in2 = self.scope.input2
-
-        self.scope.input1 = 'out1'  # Reference signal
-        self.scope.input2 = 'in1'  # Input signal
+        self.scope.input1 = 'out1'  # Reference signal from IQ module
+        self.scope.input2 = 'in1'   # Input signal
         time.sleep(0.05)
         self.scope.single()
         out1_raw = np.array(self.scope._data_ch1_current)
@@ -252,8 +197,8 @@ class RedPitaya:
         t_raw = np.arange(len(out1_raw)) / self.sample_rate
 
         # Switch back to lock-in outputs
-        self.scope.input1 = scope_backup_in1
-        self.scope.input2 = scope_backup_in2
+        self.scope.input1 = 'iq2'
+        self.scope.input2 = 'iq2_2'
 
         # FFT calculations
         iq = self.all_X + 1j * self.all_Y
@@ -272,25 +217,21 @@ class RedPitaya:
         print(f"FFT Peak Found at: {freqs_lock[idx]:.2f} Hz")
         print(f"Peak Offset from 0 Hz: {abs(freqs_lock[idx]):.2f} Hz")
 
-        # Check if lock-in is working properly
         if abs(freqs_lock[idx]) < 5:
             print("✓ Lock-in is LOCKED (peak near 0 Hz)")
         else:
             print("✗ WARNING: Lock-in NOT locked! Peak should be at 0 Hz!")
-            print("  Peak at:", freqs_lock[idx], "Hz")
-            print("  This might indicate wrong scope channel assignment")
 
         print(f"Sample Rate: {self.sample_rate:.2f} Hz")
         print(f"Total Samples: {len(self.all_X)}")
         print(f"Measurement Duration: {len(self.all_X) / self.sample_rate:.3f} seconds")
         print("-" * 60)
         print(f"Mean R: {np.mean(R):.6f} V ± {np.std(R):.6f} V")
-        print(f"SNR (R): {np.mean(R) / np.std(R):.2f} (mean/std)")
+        print(f"SNR (R): {np.mean(R) / (np.std(R) + 1e-9):.2f} (mean/std)")
         print(f"R range: [{np.min(R):.6f}, {np.max(R):.6f}] V")
 
-        # Check if R is close to expected value
         expected_R = params['ref_amp'] / 2
-        if abs(np.mean(R) - expected_R) < 0.1:
+        if abs(np.mean(R) - expected_R) < 0.05:
             print(f"✓ R close to expected {expected_R:.3f}V")
         else:
             print(f"✗ R differs from expected {expected_R:.3f}V")
@@ -303,19 +244,21 @@ class RedPitaya:
         print(f"Theta range: [{np.min(Theta):.6f}, {np.max(Theta):.6f}] rad")
         print(f"Phase stability: {np.std(Theta):.3f} rad (lower is better)")
 
-        # Additional diagnostic: check if X or Y are oscillating
         X_ac = np.std(self.all_X)
         Y_ac = np.std(self.all_Y)
         X_dc = np.mean(np.abs(self.all_X))
         Y_dc = np.mean(np.abs(self.all_Y))
+
         print("-" * 60)
         print("Signal characteristics:")
         print(f"X: DC={X_dc:.6f}V, AC={X_ac:.6f}V, AC/DC={X_ac / max(X_dc, 0.001):.3f}")
         print(f"Y: DC={Y_dc:.6f}V, AC={Y_ac:.6f}V, AC/DC={Y_ac / max(Y_dc, 0.001):.3f}")
+
         if X_ac / max(X_dc, 0.001) > 0.5:
             print("⚠ WARNING: X is oscillating! Should be flat for locked signal")
         if Y_ac / max(Y_dc, 0.001) > 0.5:
             print("⚠ WARNING: Y is oscillating! Should be flat for locked signal")
+
         print("=" * 60)
 
         # Create comprehensive plot
@@ -354,10 +297,10 @@ class RedPitaya:
         ax4 = plt.subplot(3, 3, 4)
         ax4.plot(t, self.all_X, 'b-', linewidth=0.5)
         ax4.axhline(np.mean(self.all_X), color='r', linestyle='--', alpha=0.7,
-                    label=f'Mean: {np.mean(self.all_X):.4f}V')
+                   label=f'Mean: {np.mean(self.all_X):.4f}V')
         ax4.set_xlabel('Time (s)')
         ax4.set_ylabel('X (V)')
-        ax4.set_title('In-phase (X) vs Time')
+        ax4.set_title('In-phase (X) vs Time [iq2]')
         ax4.legend()
         ax4.grid(True)
 
@@ -365,17 +308,18 @@ class RedPitaya:
         ax5 = plt.subplot(3, 3, 5)
         ax5.plot(t, self.all_Y, 'r-', linewidth=0.5)
         ax5.axhline(np.mean(self.all_Y), color='b', linestyle='--', alpha=0.7,
-                    label=f'Mean: {np.mean(self.all_Y):.4f}V')
+                   label=f'Mean: {np.mean(self.all_Y):.4f}V')
         ax5.set_xlabel('Time (s)')
         ax5.set_ylabel('Y (V)')
-        ax5.set_title('Quadrature (Y) vs Time')
+        ax5.set_title('Quadrature (Y) vs Time [iq2_2]')
         ax5.legend()
         ax5.grid(True)
 
         # 6. X vs Y (IQ plot)
         ax6 = plt.subplot(3, 3, 6)
         ax6.plot(self.all_X, self.all_Y, 'g.', markersize=1, alpha=0.5)
-        ax6.plot(np.mean(self.all_X), np.mean(self.all_Y), 'r+', markersize=15, markeredgewidth=2, label='Mean')
+        ax6.plot(np.mean(self.all_X), np.mean(self.all_Y), 'r+', markersize=15,
+                markeredgewidth=2, label='Mean')
         ax6.set_xlabel('X (V)')
         ax6.set_ylabel('Y (V)')
         ax6.set_title('IQ Plot (X vs Y)')
@@ -386,7 +330,8 @@ class RedPitaya:
         # 7. R vs Time
         ax7 = plt.subplot(3, 3, 7)
         ax7.plot(t, R, 'm-', linewidth=0.5)
-        ax7.axhline(np.mean(R), color='b', linestyle='--', alpha=0.7, label=f'Mean: {np.mean(R):.4f}V')
+        ax7.axhline(np.mean(R), color='b', linestyle='--', alpha=0.7,
+                   label=f'Mean: {np.mean(R):.4f}V')
         ax7.set_xlabel('Time (s)')
         ax7.set_ylabel('R (V)')
         ax7.set_title('Magnitude (R) vs Time')
@@ -396,7 +341,8 @@ class RedPitaya:
         # 8. Theta vs Time
         ax8 = plt.subplot(3, 3, 8)
         ax8.plot(t, Theta, 'c-', linewidth=0.5)
-        ax8.axhline(np.mean(Theta), color='r', linestyle='--', alpha=0.7, label=f'Mean: {np.mean(Theta):.4f} rad')
+        ax8.axhline(np.mean(Theta), color='r', linestyle='--', alpha=0.7,
+                   label=f'Mean: {np.mean(Theta):.4f} rad')
         ax8.set_xlabel('Time (s)')
         ax8.set_ylabel('Theta (rad)')
         ax8.set_title('Phase (Theta) vs Time')
@@ -418,7 +364,6 @@ class RedPitaya:
         if params['save_file']:
             if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
-
             img_path = os.path.join(self.output_dir, f'lockin_results_rf_{self.ref_freq}.png')
             data = np.column_stack((R, Theta, self.all_X, self.all_Y))
             csv_path = os.path.join(self.output_dir, f'lockin_results_rf_{self.ref_freq}.csv')
@@ -447,16 +392,19 @@ if __name__ == '__main__':
     print("=" * 60)
     print("RED PITAYA LOCK-IN AMPLIFIER")
     print("=" * 60)
-    print(f"Reference: {REF_FREQUENCY} Hz @ {REF_AMPLITUDE} V")
+    print("SETUP: Connect OUT1 directly to IN1")
+    print("=" * 60)
+    print(f"Reference: {REF_FREQUENCY} Hz @ {REF_AMPLITUDE} V on {OUTPUT_CHANNEL}")
     print(f"Filter Bandwidth: {FILTER_BANDWIDTH} Hz")
     print(f"Measurement Time: {MEASUREMENT_TIME} s")
     print(f"Averaging Window: {AVERAGING_WINDOW} samples")
     print("=" * 60)
-    print("Expected for 1V sin wave perfectly locked:")
+    print("Expected for direct OUT1→IN1 connection:")
     print(f"  X = {REF_AMPLITUDE / 2:.3f} V (in-phase)")
     print("  Y = 0.000 V (quadrature)")
     print(f"  R = {REF_AMPLITUDE / 2:.3f} V (magnitude)")
     print("  Theta = 0.000 rad (phase)")
+    print("  FFT peak at 0 Hz")
     print("=" * 60)
 
     rp.run(run_params)
