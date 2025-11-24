@@ -1,339 +1,353 @@
 """
-SIMPLE Red Pitaya Lock-In Experiment for Electrochemistry
-
-PHYSICAL CONNECTIONS NEEDED:
-============================
-1. Red Pitaya OUT1 → Apply to your electrochemical cell (excitation voltage)
-2. Cell response signal → Red Pitaya IN1 (measures current response)
-3. NI DAQ ai0 - ai6 → Other signals from your experiment
-4. Make sure Red Pitaya and PC are on same network
-
-WHAT THIS DOES:
-===============
-- Red Pitaya generates AC voltage at your frequency (e.g., 500 Hz)
-- This excites your electrochemical cell
-- Red Pitaya measures the AC current response using lock-in detection
-- NI DAQ records additional signals (DC ramp, phase, etc.)
-- Everything is plotted in real-time
+FILE 1: LIC_Object.py (Red Pitaya version)
+EXACT REPLACEMENT - Signal Recovery GPIB → Red Pitaya (using your working lock-in code)
 """
 
 import threading
 import time
-import os
-import csv
 from PyDAQmx import *
 import ctypes
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from pyrpl import Pyrpl
 
 # ============================================================
-# STEP 1: SET YOUR PARAMETERS HERE
+# RED PITAYA CONNECTION SETTINGS
 # ============================================================
-FREQUENCY = 500              # Hz - How fast the AC signal oscillates
-AMPLITUDE = 0.2              # Volts - Size of AC excitation
-MEASUREMENT_TIME = 12        # Seconds - How long to measure
-
-# Where to save data (change this to your path!)
-SAVE_DIRECTORY = 'C:\\test_data'
-FILE_NAME = 'my_experiment'
-
-# Red Pitaya network address (check your Red Pitaya's IP/hostname)
-RED_PITAYA_ADDRESS = 'rp-f073ce.local'
+RP_HOSTNAME = 'rp-f073ce.local'
+RP_CONFIG = 'lockin_config'
 # ============================================================
 
 
-class SimpleRedPitayaExperiment(Task):
-    """Simple lock-in amplifier experiment combining Red Pitaya + NI DAQ"""
-    
-    def __init__(self):
+class SEEDTask(Task):
+    def __init__(self, duration=3600, rate=500, data_len=250, frequency=500, amplitude=0.2):
         Task.__init__(self)
+
+        self.dev_name = "Dev1"
+
+        # REPLACED: Signal Recovery GPIB lock-in → Red Pitaya
+        print("Connecting to Red Pitaya lock-in...")
+        self.rp = Pyrpl(config=RP_CONFIG, hostname=RP_HOSTNAME)
+        self.rp_modules = self.rp.rp
+        self.lockin = self.rp_modules.iq2
+        self.scope = self.rp_modules.scope
+
+        # Convert frequency and amplitude (same as Signal Recovery did)
+        self.frequency = frequency  # Hz
+        self.amplitude = round((amplitude/1.414), 3)  # Convert V to Vrms
+
+        print(f"Setting up Red Pitaya lock-in: {frequency} Hz, {self.amplitude} Vrms")
         
-        print("\n" + "="*60)
-        print("STARTING RED PITAYA LOCK-IN EXPERIMENT")
-        print("="*60)
+        # Turn off ASG0 (IQ module generates the signal)
+        self.rp_modules.asg0.output_direct = 'off'
         
-        # Basic settings
-        self.frequency = FREQUENCY
-        self.amplitude = AMPLITUDE
-        self.duration = MEASUREMENT_TIME
-        self.rate = 500.0  # DAQ sampling rate (Hz)
-        self.dataLen = 250  # Samples per read
-        
-        # Initialize Red Pitaya
-        print("\nConnecting to Red Pitaya at:", RED_PITAYA_ADDRESS)
-        print("(This might take 10-20 seconds...)")
-        try:
-            self.rp = Pyrpl(config='my_config', hostname=RED_PITAYA_ADDRESS)
-            self.lockin = self.rp.rp.iq2  # Lock-in module
-            self.scope = self.rp.rp.scope  # Scope for reading data
-            print("✓ Red Pitaya connected!")
-        except Exception as e:
-            print("✗ ERROR: Could not connect to Red Pitaya!")
-            print("  Check that it's on the network and the hostname is correct")
-            raise e
-        
-        # Setup Red Pitaya as lock-in amplifier
-        print("\nConfiguring lock-in amplifier...")
-        print(f"  Frequency: {self.frequency} Hz")
-        print(f"  Amplitude: {self.amplitude} V")
-        
+        # Setup IQ2 module as lock-in (from your working code)
         self.lockin.setup(
-            frequency=self.frequency,      # AC frequency
-            bandwidth=10,                  # Filter bandwidth (Hz)
-            gain=0.0,                      # No feedback
-            phase=0,                       # Phase offset
-            acbandwidth=0,                 # DC-coupled
-            amplitude=self.amplitude,      # Output amplitude
-            input='in1',                   # Read from IN1
-            output_direct='out1',          # Output to OUT1
+            frequency=frequency,
+            bandwidth=10,              # Filter bandwidth (equivalent to TC 13)
+            gain=0.0,                  # No feedback
+            phase=0,                   # Phase offset
+            acbandwidth=0,             # DC-coupled input
+            amplitude=self.amplitude,  # Output amplitude (Vrms)
+            input='in1',               # Measure from IN1
+            output_direct='out1',      # Output excitation to OUT1
             output_signal='quadrature',
-            quadrature_factor=1
-        )
+            quadrature_factor=1)
         
-        # Setup scope to read lock-in outputs
-        self.scope.input1 = 'iq2'     # X (in-phase component)
-        self.scope.input2 = 'iq2_2'   # Y (quadrature component)
+        # Setup scope to read lock-in X and Y outputs (from your working code)
+        self.scope.input1 = 'iq2'    # X (in-phase)
+        self.scope.input2 = 'iq2_2'  # Y (quadrature)
         self.scope.decimation = 64
         self.scope._start_acquisition_rolling_mode()
+        self.scope.average = True
+        self.rp_sample_rate = 125e6 / self.scope.decimation
         
-        print("✓ Lock-in configured!")
-        print("\n  OUT1 is now outputting", self.amplitude, "V sine wave at", self.frequency, "Hz")
-        print("  IN1 is being measured by the lock-in amplifier")
+        # Sensitivity (Red Pitaya outputs in Volts directly)
+        self.sensitivity = 1.0
         
-        # Setup NI DAQ
-        print("\nSetting up NI DAQ...")
-        self.CreateAIVoltageChan("Dev1/ai0", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
-        self.CreateAIVoltageChan("Dev1/ai1", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
-        self.CreateAIVoltageChan("Dev1/ai2", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
-        self.CreateAIVoltageChan("Dev1/ai3", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
-        self.CreateAIVoltageChan("Dev1/ai4", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
-        self.CreateAIVoltageChan("Dev1/ai5", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
-        self.CreateAIVoltageChan("Dev1/ai6", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
-        self.CfgSampClkTiming("", self.rate, DAQmx_Val_Rising, DAQmx_Val_ContSamps, self.dataLen)
-        print("✓ NI DAQ ready!")
+        print(f"Red Pitaya lock-in ready. Sensitivity: {self.sensitivity}")
         
-        # Create data arrays
-        total_samples = int(self.duration * self.rate)
-        self.time = np.arange(0, self.duration, 1/self.rate)
-        self.mag = np.zeros(total_samples)          # Lock-in magnitude
-        self.dcRamp = np.zeros(total_samples)       # DC ramp from DAQ
-        self.phase = np.zeros(total_samples)        # Phase from DAQ
-        self.signal = np.zeros(total_samples)       # Calculated signal (mA)
-        self.lock_X = np.zeros(total_samples)       # Lock-in X output
-        self.lock_Y = np.zeros(total_samples)       # Lock-in Y output
-        
+        # All original settings
+        self.rate = float(rate)
+        self.duration = float(duration)
+        self.time = np.arange(0, self.duration, 1 / self.rate)
+
+        self.dataLen = data_len
         self._data = np.zeros((self.dataLen, 7))
+
+        # Preallocate data logging arrays
+        self.mag = np.zeros((int(self.duration) * int(self.rate),))
+        self.dcRamp = np.zeros((int(self.duration) * int(self.rate),))
+        self.phase = np.zeros((int(self.duration) * int(self.rate),))
+        self.signal = np.zeros((int(self.duration) * int(self.rate),))
         self.read = int32()
+        self.compError = 0
         self.numRecord = 0
+
+        # Create Voltage Channels
+        self.CreateAIVoltageChan(self.dev_name + "/ai0", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
+        self.CreateAIVoltageChan(self.dev_name + "/ai1", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
+        self.CreateAIVoltageChan(self.dev_name + "/ai2", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
+        self.CreateAIVoltageChan(self.dev_name + "/ai3", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
+        self.CreateAIVoltageChan(self.dev_name + "/ai4", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
+        self.CreateAIVoltageChan(self.dev_name + "/ai5", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
+        self.CreateAIVoltageChan(self.dev_name + "/ai6", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
+
+        self.CfgSampClkTiming("", self.rate, DAQmx_Val_Rising, DAQmx_Val_ContSamps, self.dataLen)
+
+        # PID Gains
+        self.Kp = 0
+        self.Kd = 0
+        self.Ki = 0
+
+        self.units = 'pm'
         
-        print("\n" + "="*60)
-        print("READY TO START!")
-        print("="*60)
-        time.sleep(0.5)  # Let everything settle
-    
-    def read_lockin(self):
-        """Read X and Y from Red Pitaya lock-in"""
-        self.scope.single()
-        X_array = np.array(self.scope._data_ch1_current)
-        Y_array = np.array(self.scope._data_ch2_current)
-        X = np.mean(X_array)  # Average value
-        Y = np.mean(Y_array)
-        return X, Y
-    
+        time.sleep(0.5)  # Let lock-in settle
+
+    def read_lockin_magnitude(self):
+        """Read magnitude from Red Pitaya lock-in (from your working code)"""
+        try:
+            self.scope.single()
+            ch1 = np.array(self.scope._data_ch1_current)  # iq2 = X
+            ch2 = np.array(self.scope._data_ch2_current)  # iq2_2 = Y
+            X = np.mean(ch1)
+            Y = np.mean(ch2)
+            R = np.sqrt(X**2 + Y**2)  # Magnitude
+            return R
+        except:
+            return 0.0
+
+    def compensate(self):
+        return 0
+
+    def set_comp_voltage(self, v):
+        return 0.0
+
     def continuousRecord(self):
-        """Setup continuous data acquisition"""
         self._data_lock = threading.Lock()
+        self._iP_lock = threading.Lock()
         self._newdata_event = threading.Event()
         self.AutoRegisterEveryNSamplesEvent(DAQmx_Val_Acquired_Into_Buffer, self.dataLen, 0)
         self.AutoRegisterDoneEvent(0)
-    
+
     def EveryNCallback(self):
-        """Called every time new data is available"""
         if self.numRecord < self.duration * self.rate:
             with self._data_lock:
-                # Read NI DAQ
-                self.ReadAnalogF64(DAQmx_Val_Auto, 10.0, DAQmx_Val_GroupByScanNumber,
+                self.ReadAnalogF64(DAQmx_Val_Auto, 10.0, DAQmx_Val_GroupByScanNumber, 
                                   self._data, self.dataLen * 7, ctypes.byref(self.read), None)
+                self._newdata_event.set()
                 
-                # Read Red Pitaya lock-in
-                X, Y = self.read_lockin()
-                R = np.sqrt(X**2 + Y**2)  # Magnitude
+                # KEY CHANGE: Read magnitude from Red Pitaya instead of DAQ ai0
+                lock_in_mag = self.read_lockin_magnitude()
                 
-                # Store data
-                idx = slice(self.numRecord, self.numRecord + self.dataLen)
-                self.mag[idx] = np.abs(self._data[:, 0])
-                self.dcRamp[idx] = -self._data[:, 1]
-                self.phase[idx] = self._data[:, 4] * 20
-                self.lock_X[idx] = X
-                self.lock_Y[idx] = Y
-                self.signal[idx] = R * 0.707  # Convert to RMS current (mA)
+                # Update arrays (mag now comes from Red Pitaya, everything else from DAQ)
+                self.mag[self.numRecord:self.numRecord + self.dataLen] = lock_in_mag
+                self.dcRamp[self.numRecord:self.numRecord + self.dataLen] = -self._data[:, 1]
+                self.phase[self.numRecord:self.numRecord + self.dataLen] = self._data[:, 4] * 20
+                self.signal[self.numRecord:self.numRecord + self.dataLen] = \
+                    self.mag[self.numRecord:self.numRecord + self.dataLen] * self.sensitivity * 0.707
+                
+                self.compensate()
+                self.numRecord += self.dataLen
+                self._newdata_event.set()
+
+        return 0
+
+    def SetCompensatorStatus(self, status):
+        if status == "off":
+            self.CompensatorStatus = 0
+        else:
+            self.CompensatorStatus = 1
+
+    def DoneCallback(self, status):
+        print("Status", status.value)
+        return 0
+
+    def get_data(self, blocking=True, timeout=None):
+        if blocking:
+            if not self._newdata_event.wait(timeout):
+                raise ValueError("timeout waiting for data from device")
+        with self._data_lock:
+            self._newdata_event.clear()
+            return self._data.copy()
+
+    def getIntialVoltageList(self):
+        return 0.0
+
+    def initialNull(self):
+        compensatorVoltages = self.getIntialVoltageList()
+        self.voltageList = []
+
+        def updateCompList():
+            self.StartTask()
+            self.ReadAnalogF64(DAQmx_Val_Auto, 10.0, DAQmx_Val_GroupByScanNumber, 
+                             self._data, self.dataLen * 5, ctypes.byref(self.read), None)
+            d = np.mean(self._data[:, 2] - self._data[:, 3])
+            self.voltageList.append(d)
+            self.StopTask()
+
+        for x in compensatorVoltages:
+            self.setCompVoltage(x)
+            time.sleep(0.1)
+            updateCompList()
+
+        self.voltageList = np.absolute(self.voltageList)
+        self.compVoltage = compensatorVoltages[np.argmin(self.voltageList)]
+        self.setCompVoltage(self.compVoltage)
+
+    def plotCompResponse(self):
+        self.compensatorVoltages = np.arange(-4.0, 4.0, .05)
+        self.voltageList = []
+
+        def updateCompList():
+            self.StartTask()
+            self.ReadAnalogF64(DAQmx_Val_Auto, 10.0, DAQmx_Val_GroupByScanNumber, 
+                             self._data, self.dataLen * 5, ctypes.byref(self.read), None)
+            time.sleep(0.1)
+            d = np.mean(self._data[:, 2] - self._data[:, 3])
+            self.voltageList.append(d)
+            self.StopTask()
+
+        for x in self.compensatorVoltages:
+            self.setCompVoltage(x)
+            time.sleep(0.01)
+            updateCompList()
+
+        import matplotlib.pyplot as plt
+        plt.plot(self.compensatorVoltages, self.voltageList)
+
+    def reset(self):
+        self.mag = np.zeros((int(self.duration) * int(self.rate),))
+        self.dcRamp = np.zeros((int(self.duration) * int(self.rate),))
+        self.phase = np.zeros((int(self.duration) * int(self.rate),))
+        self.signal = np.zeros((int(self.duration) * int(self.rate),))
+        self.read = int32()
+        self.compError = 0
+        self.numRecord = 0
+
+
+# ============================================================
+# FILE 2: LIC_Measurement_Types.py
+# ============================================================
+import os
+import csv
+
+class LockInCurrent(SEEDTask):
+    def __init__(self, duration=3600, rate=500, data_len=250, frequency=500, amplitude=0.2):
+        SEEDTask.__init__(self, duration, rate, data_len, frequency, amplitude)
+        self.units = 'mA'
+
+    def EveryNCallback(self):
+        if self.numRecord < self.duration * self.rate:
+            with self._data_lock:
+                self.ReadAnalogF64(DAQmx_Val_Auto, 10.0, DAQmx_Val_GroupByScanNumber, 
+                                  self._data, self.dataLen * 7, ctypes.byref(self.read), None)
+                self._newdata_event.set()
+                
+                # KEY CHANGE: Read magnitude from Red Pitaya
+                lock_in_mag = self.read_lockin_magnitude()
+                
+                # Update arrays
+                self.mag[self.numRecord:self.numRecord + self.dataLen] = np.absolute(lock_in_mag)
+                self.dcRamp[self.numRecord:self.numRecord + self.dataLen] = -self._data[:, 1]
+                self.phase[self.numRecord:self.numRecord + self.dataLen] = self._data[:, 4] * 20
+                self.signal[self.numRecord:self.numRecord + self.dataLen] = \
+                    self.mag[self.numRecord:self.numRecord + self.dataLen] * self.sensitivity * 0.707
                 
                 self.numRecord += self.dataLen
                 self._newdata_event.set()
-        return 0
-    
-    def DoneCallback(self, status):
-        print("\nAcquisition complete!")
+
         return 0
 
-
-def save_data(task, filename, directory):
-    """Save all data to files"""
-    print("\nSaving data...")
-    
-    # Create directory if needed
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-    
-    # Save as NPZ (numpy format)
-    filepath = os.path.join(directory, filename + '.npz')
-    np.savez(filepath,
-             time=task.time,
-             signal=task.signal,
-             dcRamp=task.dcRamp,
-             phase=task.phase,
-             mag=task.mag,
-             lock_X=task.lock_X,
-             lock_Y=task.lock_Y)
-    
-    print(f"✓ Saved to: {filepath}")
-    
-    # Also save as CSV
-    csv_dir = os.path.join(directory, filename + '_csv')
-    if not os.path.exists(csv_dir):
-        os.makedirs(csv_dir)
-    
-    data_dict = {
-        'time': task.time,
-        'signal_mA': task.signal,
-        'dcRamp': task.dcRamp,
-        'phase': task.phase,
-        'lock_X': task.lock_X,
-        'lock_Y': task.lock_Y
-    }
-    
-    for name, data in data_dict.items():
-        csv_path = os.path.join(csv_dir, name + '.csv')
-        np.savetxt(csv_path, data, delimiter=',', header=name, comments='')
-    
-    print(f"✓ CSV files saved to: {csv_dir}")
+    def compensate(self):
+        return 0
 
 
-def run_experiment():
-    """Main function to run the experiment"""
+def save_LIC(taskName, fileName):
+    tempDir = os.getcwd()
     
-    # Create experiment
-    experiment = SimpleRedPitayaExperiment()
+    # Auto-create save directory with timestamp
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    save_directory = os.path.join(os.getcwd(), f'RedPitaya_Data_{timestamp}')
     
-    # Setup plot
-    fig = plt.figure(figsize=(14, 8))
-    fig.suptitle(f'Red Pitaya Lock-In Experiment: {FREQUENCY} Hz, {AMPLITUDE} V', fontsize=14)
-    
-    # Create subplots
-    ax1 = fig.add_subplot(2, 2, 1)  # Signal vs time
-    ax1_twin = ax1.twinx()
-    ax2 = fig.add_subplot(2, 2, 2)  # Lock-in X and Y
-    ax3 = fig.add_subplot(2, 2, 3)  # DC Ramp
-    ax4 = fig.add_subplot(2, 2, 4)  # Phase
-    
-    def animate(i):
-        """Update plots"""
-        n = experiment.numRecord
-        if n > 10:
-            t = experiment.time[:n]
-            
-            # Clear all axes
-            ax1.clear()
-            ax1_twin.clear()
-            ax2.clear()
-            ax3.clear()
-            ax4.clear()
-            
-            # Plot 1: Signal (mA)
-            ax1.plot(t, experiment.signal[:n], 'b-', linewidth=1, label='Signal')
-            ax1.set_xlabel('Time (s)')
-            ax1.set_ylabel('Signal (mA)', color='b')
-            ax1.tick_params(axis='y', labelcolor='b')
-            ax1.grid(True)
-            ax1.set_title('Lock-In Signal')
-            
-            # Plot 2: Lock-in X and Y
-            ax2.plot(t, experiment.lock_X[:n], 'r-', linewidth=1, label='X (in-phase)')
-            ax2.plot(t, experiment.lock_Y[:n], 'b-', linewidth=1, label='Y (quadrature)')
-            ax2.set_xlabel('Time (s)')
-            ax2.set_ylabel('Voltage (V)')
-            ax2.legend()
-            ax2.grid(True)
-            ax2.set_title('Lock-In Outputs')
-            
-            # Plot 3: DC Ramp
-            ax3.plot(t, experiment.dcRamp[:n], 'g-', linewidth=1)
-            ax3.set_xlabel('Time (s)')
-            ax3.set_ylabel('DC Ramp (V)')
-            ax3.grid(True)
-            ax3.set_title('DC Ramp')
-            
-            # Plot 4: Phase
-            ax4.plot(t, experiment.phase[:n], 'm-', linewidth=1)
-            ax4.set_xlabel('Time (s)')
-            ax4.set_ylabel('Phase')
-            ax4.grid(True)
-            ax4.set_title('Phase')
-            
-            # Show progress
-            progress = (n / (experiment.duration * experiment.rate)) * 100
-            fig.suptitle(f'Red Pitaya Lock-In: {FREQUENCY} Hz, {AMPLITUDE} V  |  Progress: {progress:.1f}%', 
-                        fontsize=14)
-    
-    # Start acquisition
-    print("\nStarting measurement...")
-    experiment.continuousRecord()
-    experiment.StartTask()
-    
-    # Start animation
-    ani = animation.FuncAnimation(fig, animate, interval=100)
-    plt.tight_layout()
-    plt.show()
-    
-    # Stop and cleanup
-    experiment.StopTask()
-    experiment.ClearTask()
-    
-    # Save data
-    save_data(experiment, FILE_NAME, SAVE_DIRECTORY)
-    
-    print("\n" + "="*60)
-    print("EXPERIMENT COMPLETE!")
-    print("="*60)
-    print(f"Total samples collected: {experiment.numRecord}")
-    print(f"Mean signal: {np.mean(experiment.signal):.4f} mA")
-    print("="*60)
-    
-    return experiment
+    if not os.path.exists(save_directory):
+        os.makedirs(save_directory)
+        print(f"Created save directory: {save_directory}")
 
+    os.chdir(save_directory)
+    mag = taskName.mag
+    dcRamp = taskName.dcRamp
+    time_array = taskName.time
+    phase = taskName.phase
+    signal = taskName.signal
+    
+    np.savez(fileName + '.npz', mag=mag, dcRamp=dcRamp, phase=phase, time=time_array, signal=signal)
+    dat = loadSEEDDatanpz(fileName + '.npz')
+    os.chdir(save_directory)
+    os.mkdir(fileName)
+    os.chdir(save_directory + '\\' + fileName)
+    csvGenerate(dat)
+    os.chdir(tempDir)
+    
+    print(f"Data saved to: {save_directory}\\{fileName}")
+
+
+def loadSEEDDatanpz(fileName):
+    s = np.load(fileName)
+    dcRamp = s['dcRamp']
+    mag = s['mag']
+    phase = s['phase']
+    time_array = s['time']
+    signal = s['signal']
+    return {'dcRamp': dcRamp, 'magnitude': mag, 'phase': phase, 'time': time_array, 'signal': signal}
+
+
+def csvGenerate(dat):
+    for i in dat.keys():
+        with open(i + '.csv', 'w', newline='') as csvfile:
+            spamwriter = csv.writer(csvfile, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
+            spamwriter.writerow(dat[i])
+
+
+# ============================================================
+# FILE 3: Main execution script
+# ============================================================
 
 if __name__ == '__main__':
-    print("\n" + "="*60)
-    print("RED PITAYA LOCK-IN AMPLIFIER - SIMPLE VERSION")
-    print("="*60)
-    print("\nMAKE SURE:")
-    print("  1. Red Pitaya is connected to network")
-    print("  2. OUT1 connected to your electrochemical cell")
-    print("  3. Cell response connected to IN1")
-    print("  4. NI DAQ connected to other signals")
-    print("="*60)
+    import matplotlib.pyplot as plt
+    import matplotlib.animation as animation
+
+    print("=" * 60)
+    print("RED PITAYA LOCK-IN CURRENT MEASUREMENT")
+    print("=" * 60)
+    print("Replacing Signal Recovery GPIB lock-in with Red Pitaya")
+    print("=" * 60)
+
+    task = LockInCurrent(duration=12)  # frequency in Hz, amplitude in V
+
+    fig = plt.figure()
+    ax1 = fig.add_subplot(1, 1, 1)
+    ax2 = ax1.twinx()
+    ax2.set_ylabel(task.units, color=(31 / 255., 119 / 255., 180 / 255.))
+    ax1.set_ylabel('DC Ramp', color=(255 / 255., 127 / 255., 14 / 255.))
     
-    input("\nPress ENTER to start experiment...")
+    task.continuousRecord()
+    task.StartTask()
+
+    def animate(i):
+        ax2.plot(task.time[0:task.numRecord], task.signal[0:task.numRecord], 
+                color=(31 / 255., 119 / 255., 180 / 255.))
+        ax1.plot(task.time[0:task.numRecord], task.dcRamp[0:task.numRecord], 
+                color=(255 / 255., 127 / 255., 14 / 255.))
+
+    ani = animation.FuncAnimation(fig, animate, interval=50)
+    plt.show()
     
-    try:
-        experiment = run_experiment()
-    except KeyboardInterrupt:
-        print("\n\nExperiment stopped by user")
-    except Exception as e:
-        print("\n\nERROR:", str(e))
-        print("\nTroubleshooting:")
-        print("  - Check Red Pitaya network connection")
-        print("  - Verify NI DAQ is connected")
-        print("  - Check all cables are properly connected")
+    # After plot closes, save data
+    task.StopTask()
+    task.ClearTask()
+    
+    save_LIC(task, 'experiment_data')
+    
+    print("=" * 60)
+    print("Experiment complete!")
+    print("=" * 60)
