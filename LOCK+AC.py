@@ -20,7 +20,7 @@ EXPECTED RESULTS (OUT1 → IN1, 0.4V sine @ 100Hz):
 # MEASUREMENT PARAMETERS - CHANGE THESE
 # ============================================================
 REF_FREQUENCY = 100        # Hz - AC excitation frequency
-REF_AMPLITUDE = 2        # V - AC signal amplitude (will appear on OUT1)
+REF_AMPLITUDE = 1        # V - AC signal amplitude (will appear on OUT1)
 OUTPUT_CHANNEL = 'out1'    # 'out1' or 'out2' - where to send AC signal
 PHASE_OFFSET = 0           # degrees - phase adjustment (0, 90, 180, 270)
 MEASUREMENT_TIME = 5.0     # seconds - how long to measure
@@ -36,7 +36,7 @@ SAVE_DATA = False          # True = save to files, False = just show plots
 OUTPUT_DIRECTORY = 'test_data'
 
 # Advanced settings
-DECIMATION = 64
+DECIMATION = 8192
 SHOW_FFT = True
 # ============================================================
 
