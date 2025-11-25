@@ -1,16 +1,17 @@
 """
-LIC_Redpitaya.py - Python 2.7 Compatible Version
-Complete Lock-In Current Measurement System with Red Pitaya
+LIC_Redpitaya.py - Python 2.7 Compatible with Python 3 Bridge
+Uses a Python 3 bridge process to communicate with Red Pitaya via PyRPL
 
 SETUP:
-- Red Pitaya generates AC on OUT1 and measures on IN1
-- NI DAQ reads dcRamp from Autolab on ai1
-- Real-time plotting of signal vs dcRamp
+1. Start the Python 3 bridge first:
+   python3 redpitaya_bridge.py
 
-USAGE:
-Run in IPython: run LIC_Redpitaya
+2. Then run this Python 2.7 script:
+   python2 LIC_Redpitaya.py
 
-pip install PyDAQmx numpy matplotlib pyrpl pyvisa scipy pyqtgraph PyQt5
+Requirements:
+    Python 2.7: PyDAQmx numpy matplotlib
+    Python 3.7+: pyrpl numpy (separate environment)
 """
 
 import threading
@@ -18,28 +19,106 @@ import time
 from PyDAQmx import *
 import ctypes
 import numpy as np
-from pyrpl import Pyrpl
+import socket
+import json
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import os
 import csv
 
-
 # ============================================================================
-# USER SETTINGS - CHANGE THESE
+# USER SETTINGS
 # ============================================================================
-RED_PITAYA_HOSTNAME = 'rp-f073ce.local'  # UPDATE THIS to your Red Pitaya IP/hostname
+BRIDGE_HOST = 'rp-f073ce.local'  # Bridge server address
+BRIDGE_PORT = 9999  # Bridge server port
 MEASUREMENT_DURATION = 12  # seconds
-LOCK_IN_FREQUENCY = 500    # Hz
-LOCK_IN_AMPLITUDE = 0.2    # V
-FILTER_BANDWIDTH = 10      # Hz - lock-in filter bandwidth
-SAMPLE_RATE = 500          # samples per second
-DATA_BUFFER_LENGTH = 250   # samples per buffer
+LOCK_IN_FREQUENCY = 500  # Hz
+LOCK_IN_AMPLITUDE = 0.2  # V
+FILTER_BANDWIDTH = 10  # Hz
+SAMPLE_RATE = 500  # samples per second
+DATA_BUFFER_LENGTH = 250  # samples per buffer
 
 SAVE_DIRECTORY = 'C:\\SEED 3.2 Data\\Joydip\\e2025\\Novenber\\Batch 3 Chip testing'
-AUTO_SAVE = True           # Set to True to automatically save data at end
-AUTO_SAVE_FILENAME = 'measurement'  # Default filename for auto-save
+AUTO_SAVE = True
+AUTO_SAVE_FILENAME = 'measurement'
+
+
 # ============================================================================
+
+
+class RedPitayaClient(object):
+    """Client to communicate with Python 3 bridge"""
+
+    def __init__(self, host='localhost', port=9999):
+        self.host = host
+        self.port = port
+        self.socket = None
+        self.connect()
+
+    def connect(self):
+        """Connect to bridge server"""
+        print("Connecting to Red Pitaya bridge at {}:{}".format(self.host, self.port))
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.settimeout(5.0)
+            self.socket.connect((self.host, self.port))
+
+            # Test connection
+            response = self.send_command({'cmd': 'ping'})
+            if response.get('status') == 'ok':
+                print("Successfully connected to Red Pitaya bridge!")
+            else:
+                raise Exception("Bridge not responding correctly")
+        except socket.error as e:
+            print("=" * 60)
+            print("ERROR: Cannot connect to Python 3 bridge!")
+            print("=" * 60)
+            print("Make sure you start the bridge first:")
+            print("  1. Open a NEW terminal/command prompt")
+            print("  2. Activate Python 3 environment")
+            print("  3. Run: python redpitaya_bridge.py")
+            print("=" * 60)
+            raise
+
+    def send_command(self, command):
+        """Send command and get response"""
+        try:
+            # Send command
+            self.socket.sendall(json.dumps(command).encode('utf-8'))
+
+            # Receive response
+            data = self.socket.recv(4096)
+            response = json.loads(data.decode('utf-8'))
+            return response
+        except Exception as e:
+            print("Bridge communication error: {}".format(e))
+            return {'status': 'error', 'message': str(e)}
+
+    def setup(self, frequency, amplitude, bandwidth=10):
+        """Setup lock-in amplifier"""
+        cmd = {
+            'cmd': 'setup',
+            'frequency': frequency,
+            'amplitude': amplitude,
+            'bandwidth': bandwidth
+        }
+        return self.send_command(cmd)
+
+    def get_XY(self):
+        """Get X and Y values"""
+        response = self.send_command({'cmd': 'get_xy'})
+        if response.get('status') == 'ok':
+            return response.get('X', 0.0), response.get('Y', 0.0)
+        else:
+            return 0.0, 0.0
+
+    def close(self):
+        """Close connection"""
+        try:
+            self.send_command({'cmd': 'shutdown'})
+            self.socket.close()
+        except:
+            pass
 
 
 class SEEDTask(Task):
@@ -48,56 +127,32 @@ class SEEDTask(Task):
 
         self.dev_name = "Dev1"
 
-        # Red Pitaya Lock-In Setup (replaces GPIB lock-in)
+        # Red Pitaya via Python 3 Bridge
         print("=" * 60)
-        print("Initializing Red Pitaya Lock-In...")
+        print("Initializing Red Pitaya via Python 3 Bridge...")
         print("=" * 60)
-        self.rp = Pyrpl(config='lockin_config', hostname=RED_PITAYA_HOSTNAME)
-        self.rp_modules = self.rp.rp
-        self.lock_in = self.rp_modules.iq2
-        self.ref_sig = self.rp_modules.asg0
-        self.scope = self.rp_modules.scope
 
-        # Frequency and amplitude (same parameters as GPIB version)
-        self.frequency = frequency  # Hz
-        self.amplitude = amplitude  # V
-        
-        # Lock-in amplifier settings
-        filter_bw = FILTER_BANDWIDTH
-        
-        # Turn off ASG0 - IQ module handles signal generation
-        self.ref_sig.output_direct = 'off'
-        
-        # Setup IQ module (equivalent to GPIB lock-in settings)
-        self.lock_in.setup(
-            frequency=self.frequency,
-            bandwidth=filter_bw,
-            gain=0.0,
-            phase=0,
-            acbandwidth=0,
-            amplitude=self.amplitude,
-            input='in1',
-            output_direct='out1',  # Output AC signal on OUT1
-            output_signal='quadrature',
-            quadrature_factor=1
-        )
-        
-        # Configure scope to read lock-in X and Y outputs
-        self.scope.input1 = 'iq2'    # X (in-phase)
-        self.scope.input2 = 'iq2_2'  # Y (quadrature)
-        self.scope.decimation = 64
-        self.scope._start_acquisition_rolling_mode()
-        self.sample_rate_rp = 125e6 / self.scope.decimation
-        
-        # Sensitivity (equivalent to GPIB SEN query)
-        self.sensitivity = 1.0  # Red Pitaya outputs directly in Volts
-        
+        try:
+            self.rp = RedPitayaClient(BRIDGE_HOST, BRIDGE_PORT)
+        except Exception as e:
+            print("FATAL ERROR: Cannot connect to bridge")
+            raise
+
+        # Frequency and amplitude
+        self.frequency = frequency
+        self.amplitude = amplitude
+
+        # Setup lock-in via bridge
+        result = self.rp.setup(self.frequency, self.amplitude, FILTER_BANDWIDTH)
+        if result.get('status') != 'ok':
+            raise Exception("Failed to setup Red Pitaya: {}".format(result.get('message')))
+
+        self.sensitivity = 1.0
+
         print("Red Pitaya Lock-in: {} Hz @ {} V".format(self.frequency, self.amplitude))
-        print("Filter Bandwidth: {} Hz".format(filter_bw))
-        print("Output: OUT1 | Input: IN1")
+        print("Filter Bandwidth: {} Hz".format(FILTER_BANDWIDTH))
         print("=" * 60)
-        
-        # Wait for lock-in to settle
+
         time.sleep(0.5)
 
         self.rate = float(rate)
@@ -107,22 +162,19 @@ class SEEDTask(Task):
         self.dataLen = data_len
         self._data = np.zeros((self.dataLen, 7))
 
-        # Preallocate data logging arrays (same as original)
+        # Preallocate data arrays
         self.mag = np.zeros((int(self.duration) * int(self.rate),))
         self.dcRamp = np.zeros((int(self.duration) * int(self.rate),))
         self.phase = np.zeros((int(self.duration) * int(self.rate),))
         self.signal = np.zeros((int(self.duration) * int(self.rate),))
-        
-        # Store X and Y from Red Pitaya
         self.X_rp = np.zeros((int(self.duration) * int(self.rate),))
         self.Y_rp = np.zeros((int(self.duration) * int(self.rate),))
-        
+
         self.read = int32()
         self.compError = 0
         self.numRecord = 0
 
-        # Create Voltage Channels (same as original)
-        # ai1 - dcRamp from Autolab (main channel we need)
+        # NI DAQ channels
         self.CreateAIVoltageChan(self.dev_name + "/ai0", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
         self.CreateAIVoltageChan(self.dev_name + "/ai1", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
         self.CreateAIVoltageChan(self.dev_name + "/ai2", '', DAQmx_Val_Cfg_Default, -10.0, 10.0, DAQmx_Val_Volts, None)
@@ -133,26 +185,16 @@ class SEEDTask(Task):
 
         self.CfgSampClkTiming("", self.rate, DAQmx_Val_Rising, DAQmx_Val_ContSamps, self.dataLen)
 
-        # PID Gains
         self.Kp = 0
         self.Kd = 0
         self.Ki = 0
-
         self.units = 'pm'
 
     def get_red_pitaya_XY(self):
-        """Get current X and Y values from Red Pitaya scope"""
-        try:
-            self.scope.single()
-            ch1 = np.array(self.scope._data_ch1_current)  # X (in-phase)
-            ch2 = np.array(self.scope._data_ch2_current)  # Y (quadrature)
-            # Return mean values
-            return np.mean(ch1), np.mean(ch2)
-        except:
-            return 0.0, 0.0
+        """Get X and Y from Red Pitaya via bridge"""
+        return self.rp.get_XY()
 
     def compensate(self):
-        # Placeholder - same as original
         return 0
 
     def set_comp_voltage(self, v):
@@ -168,33 +210,32 @@ class SEEDTask(Task):
     def EveryNCallback(self):
         if self.numRecord < self.duration * self.rate:
             with self._data_lock:
-                # Read NI DAQ (gets dcRamp and other channels)
-                self.ReadAnalogF64(DAQmx_Val_Auto, 10.0, DAQmx_Val_GroupByScanNumber, self._data, self.dataLen * 7, ctypes.byref(self.read), None)
-                
-                # Get Red Pitaya X/Y data for each sample in the buffer
+                # Read NI DAQ
+                self.ReadAnalogF64(DAQmx_Val_Auto, 10.0, DAQmx_Val_GroupByScanNumber, self._data, self.dataLen * 7,
+                                   ctypes.byref(self.read), None)
+
+                # Get Red Pitaya data
                 for i in range(self.dataLen):
                     X, Y = self.get_red_pitaya_XY()
-                    
-                    # Store X and Y
+
                     self.X_rp[self.numRecord + i] = X
                     self.Y_rp[self.numRecord + i] = Y
-                    
-                    # Calculate magnitude (R) and phase (Theta) from X and Y
-                    R = np.sqrt(X**2 + Y**2)
+
+                    R = np.sqrt(X ** 2 + Y ** 2)
                     Theta = np.arctan2(Y, X)
-                    
-                    # Store in mag and phase arrays (replaces ai0 and ai4)
+
                     self.mag[self.numRecord + i] = R
-                    self.phase[self.numRecord + i] = Theta * 20  # Scale factor same as original
-                
+                    self.phase[self.numRecord + i] = Theta * 20
+
                 self._newdata_event.set()
-                
-                # Update dcRamp from NI DAQ ai1 (same as original)
+
+                # dcRamp from NI DAQ ai1
                 self.dcRamp[self.numRecord:self.numRecord + self.dataLen] = -self._data[:, 1]
-                
-                # Calculate signal (same formula as original)
-                self.signal[self.numRecord:self.numRecord + self.dataLen] = self.mag[self.numRecord:self.numRecord + self.dataLen] * self.sensitivity * 0.707
-                
+
+                # Calculate signal
+                self.signal[self.numRecord:self.numRecord + self.dataLen] = self.mag[
+                                                                            self.numRecord:self.numRecord + self.dataLen] * self.sensitivity * 0.707
+
                 self.compensate()
                 self.numRecord += self.dataLen
                 self._newdata_event.set()
@@ -202,10 +243,7 @@ class SEEDTask(Task):
         return 0
 
     def SetCompensatorStatus(self, status):
-        if status == "off":
-            self.CompensatorStatus = 0
-        else:
-            self.CompensatorStatus = 1
+        self.CompensatorStatus = 0 if status == "off" else 1
 
     def DoneCallback(self, status):
         print("Status", status.value)
@@ -239,6 +277,13 @@ class SEEDTask(Task):
         self.compError = 0
         self.numRecord = 0
 
+    def cleanup(self):
+        """Cleanup"""
+        try:
+            self.rp.close()
+        except:
+            pass
+
 
 class LockInCurrent(SEEDTask):
     def __init__(self, duration=3600, rate=500, data_len=250, frequency=500, amplitude=0.2):
@@ -248,33 +293,27 @@ class LockInCurrent(SEEDTask):
     def EveryNCallback(self):
         if self.numRecord < self.duration * self.rate:
             with self._data_lock:
-                # Read NI DAQ (gets dcRamp and other channels)
-                self.ReadAnalogF64(DAQmx_Val_Auto, 10.0, DAQmx_Val_GroupByScanNumber, self._data, self.dataLen * 7, ctypes.byref(self.read), None)
-                
-                # Get Red Pitaya X/Y data for each sample in the buffer
+                self.ReadAnalogF64(DAQmx_Val_Auto, 10.0, DAQmx_Val_GroupByScanNumber, self._data, self.dataLen * 7,
+                                   ctypes.byref(self.read), None)
+
                 for i in range(self.dataLen):
                     X, Y = self.get_red_pitaya_XY()
-                    
-                    # Store X and Y
+
                     self.X_rp[self.numRecord + i] = X
                     self.Y_rp[self.numRecord + i] = Y
-                    
-                    # Calculate magnitude (R) and phase (Theta) from X and Y
-                    R = np.sqrt(X**2 + Y**2)
+
+                    R = np.sqrt(X ** 2 + Y ** 2)
                     Theta = np.arctan2(Y, X)
-                    
-                    # Store in mag and phase arrays (replaces _data[:, 0] and _data[:, 4])
+
                     self.mag[self.numRecord + i] = np.absolute(R)
-                    self.phase[self.numRecord + i] = Theta * 20  # Same scale factor as original
-                
+                    self.phase[self.numRecord + i] = Theta * 20
+
                 self._newdata_event.set()
-                
-                # Update dcRamp from NI DAQ ai1 (same as original)
+
                 self.dcRamp[self.numRecord:self.numRecord + self.dataLen] = -self._data[:, 1]
-                
-                # Calculate signal (same formula as original)
-                self.signal[self.numRecord:self.numRecord + self.dataLen] = self.mag[self.numRecord:self.numRecord + self.dataLen] * self.sensitivity * 0.707
-                
+                self.signal[self.numRecord:self.numRecord + self.dataLen] = self.mag[
+                                                                            self.numRecord:self.numRecord + self.dataLen] * self.sensitivity * 0.707
+
                 self.numRecord += self.dataLen
                 self._newdata_event.set()
 
@@ -287,8 +326,7 @@ class LockInCurrent(SEEDTask):
 def save_LIC(taskName, fileName):
     tempDir = os.getcwd()
     save_directory = SAVE_DIRECTORY
-    
-    # Create the save directory if it doesn't exist
+
     if not os.path.exists(save_directory):
         os.makedirs(save_directory)
         print("Created directory: {}".format(save_directory))
@@ -299,14 +337,14 @@ def save_LIC(taskName, fileName):
     time = taskName.time
     phase = taskName.phase
     signal = taskName.signal
-    
+
     np.savez(fileName + '.npz', mag=mag, dcRamp=dcRamp, phase=phase, time=time, signal=signal)
     dat = loadSEEDDatanpz(fileName + '.npz')
     os.chdir(save_directory)
-    
+
     if not os.path.exists(fileName):
         os.makedirs(fileName)
-    
+
     os.chdir(save_directory + '\\' + fileName)
     csvGenerate(dat)
     os.chdir(tempDir)
@@ -335,14 +373,14 @@ def csvGenerate(dat):
 if __name__ == '__main__':
     print("=" * 60)
     print("RED PITAYA LOCK-IN CURRENT MEASUREMENT")
+    print("Python 2.7 with Python 3 Bridge")
     print("=" * 60)
     print("Duration: {} seconds".format(MEASUREMENT_DURATION))
     print("Frequency: {} Hz".format(LOCK_IN_FREQUENCY))
     print("Amplitude: {} V".format(LOCK_IN_AMPLITUDE))
     print("Sample Rate: {} Hz".format(SAMPLE_RATE))
     print("=" * 60)
-    
-    # Create task with Red Pitaya lock-in
+
     task = LockInCurrent(
         duration=MEASUREMENT_DURATION,
         rate=SAMPLE_RATE,
@@ -358,27 +396,29 @@ if __name__ == '__main__':
     ax2.set_ylabel(task.units, color=(31 / 255., 119 / 255., 180 / 255.))
     ax1.set_ylabel('DC Ramp', color=(255 / 255., 127 / 255., 14 / 255.))
 
-    # Start continuous recording
     task.continuousRecord()
     task.StartTask()
 
     plt.show()
 
+
     def animate(i):
         ax2.plot(task.time[0:task.numRecord], task.signal[0:task.numRecord], color=(31 / 255., 119 / 255., 180 / 255.))
         ax1.plot(task.time[0:task.numRecord], task.dcRamp[0:task.numRecord], color=(255 / 255., 127 / 255., 14 / 255.))
 
+
     ani = animation.FuncAnimation(fig, animate, interval=50)
     plt.show()
-    
-    # Auto-save data if enabled
+
+    task.cleanup()
+
     if AUTO_SAVE:
         print("=" * 60)
         print("SAVING DATA...")
         print("=" * 60)
         try:
-            # Add timestamp to filename to avoid overwriting
             from datetime import datetime
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = "{}_{}".format(AUTO_SAVE_FILENAME, timestamp)
             save_LIC(task, filename)
@@ -387,5 +427,4 @@ if __name__ == '__main__':
             print("=" * 60)
         except Exception as e:
             print("Error saving data: {}".format(e))
-            print("You can manually save with: save_LIC(task, 'your_filename')")
             print("=" * 60)
