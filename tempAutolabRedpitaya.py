@@ -1,6 +1,6 @@
 """
-LIC_Redpitaya.py - Complete Lock-In Current Measurement System with Red Pitaya
-Single file replacement for the three-file system (LIC_Object, LIC_Measurement_Types, LIC_plot)
+LIC_Redpitaya.py - Python 2.7 Compatible Version
+Complete Lock-In Current Measurement System with Red Pitaya
 
 SETUP:
 - Red Pitaya generates AC on OUT1 and measures on IN1
@@ -92,9 +92,9 @@ class SEEDTask(Task):
         # Sensitivity (equivalent to GPIB SEN query)
         self.sensitivity = 1.0  # Red Pitaya outputs directly in Volts
         
-        print(f"Red Pitaya Lock-in: {self.frequency} Hz @ {self.amplitude} V")
-        print(f"Filter Bandwidth: {filter_bw} Hz")
-        print(f"Output: OUT1 | Input: IN1")
+        print("Red Pitaya Lock-in: {} Hz @ {} V".format(self.frequency, self.amplitude))
+        print("Filter Bandwidth: {} Hz".format(filter_bw))
+        print("Output: OUT1 | Input: IN1")
         print("=" * 60)
         
         # Wait for lock-in to settle
@@ -291,7 +291,7 @@ def save_LIC(taskName, fileName):
     # Create the save directory if it doesn't exist
     if not os.path.exists(save_directory):
         os.makedirs(save_directory)
-        print(f"Created directory: {save_directory}")
+        print("Created directory: {}".format(save_directory))
 
     os.chdir(save_directory)
     mag = taskName.mag
@@ -336,10 +336,10 @@ if __name__ == '__main__':
     print("=" * 60)
     print("RED PITAYA LOCK-IN CURRENT MEASUREMENT")
     print("=" * 60)
-    print(f"Duration: {MEASUREMENT_DURATION} seconds")
-    print(f"Frequency: {LOCK_IN_FREQUENCY} Hz")
-    print(f"Amplitude: {LOCK_IN_AMPLITUDE} V")
-    print(f"Sample Rate: {SAMPLE_RATE} Hz")
+    print("Duration: {} seconds".format(MEASUREMENT_DURATION))
+    print("Frequency: {} Hz".format(LOCK_IN_FREQUENCY))
+    print("Amplitude: {} V".format(LOCK_IN_AMPLITUDE))
+    print("Sample Rate: {} Hz".format(SAMPLE_RATE))
     print("=" * 60)
     
     # Create task with Red Pitaya lock-in
@@ -380,12 +380,12 @@ if __name__ == '__main__':
             # Add timestamp to filename to avoid overwriting
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{AUTO_SAVE_FILENAME}_{timestamp}"
+            filename = "{}_{}".format(AUTO_SAVE_FILENAME, timestamp)
             save_LIC(task, filename)
-            print(f"Data saved successfully as: {filename}")
-            print(f"Location: {SAVE_DIRECTORY}")
+            print("Data saved successfully as: {}".format(filename))
+            print("Location: {}".format(SAVE_DIRECTORY))
             print("=" * 60)
         except Exception as e:
-            print(f"Error saving data: {e}")
+            print("Error saving data: {}".format(e))
             print("You can manually save with: save_LIC(task, 'your_filename')")
             print("=" * 60)
