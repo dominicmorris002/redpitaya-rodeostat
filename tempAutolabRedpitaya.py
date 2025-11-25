@@ -35,6 +35,8 @@ SAMPLE_RATE = 500          # samples per second
 DATA_BUFFER_LENGTH = 250   # samples per buffer
 
 SAVE_DIRECTORY = 'C:\\SEED 3.2 Data\\Joydip\\e2025\\Novenber\\Batch 3 Chip testing'
+AUTO_SAVE = True           # Set to True to automatically save data at end
+AUTO_SAVE_FILENAME = 'measurement'  # Default filename for auto-save
 # ============================================================================
 
 
