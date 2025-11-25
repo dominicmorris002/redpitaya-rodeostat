@@ -9,6 +9,8 @@ SETUP:
 
 USAGE:
 Run in IPython: run LIC_Redpitaya
+
+pip install PyDAQmx numpy matplotlib pyrpl pyvisa scipy pyqtgraph PyQt5
 """
 
 import threading
