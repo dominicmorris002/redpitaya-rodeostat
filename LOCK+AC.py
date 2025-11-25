@@ -84,7 +84,7 @@ class RedPitaya:
         # CORRECTED: For iq2 module, use iq2 (X) and iq2_2 (Y)
         self.scope.input1 = 'iq2'    # X (in-phase)
         self.scope.input2 = 'iq2_2'  # Y (quadrature)
-        self.scope.decimation = 64
+        self.scope.decimation = DECIMATION
 
         if self.scope.decimation not in self.allowed_decimations:
             print('Invalid decimation')
