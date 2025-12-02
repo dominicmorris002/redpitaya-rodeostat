@@ -20,7 +20,7 @@ EXPECTED RESULTS (OUT1 → IN1, 0.4V sine @ 100Hz):
 # MEASUREMENT PARAMETERS - CHANGE THESE
 # ============================================================
 REF_FREQUENCY = 100        # Hz - AC excitation frequency
-REF_AMPLITUDE = 1        # V - AC signal amplitude (will appear on OUT1)
+REF_AMPLITUDE = 0.5        # V - AC signal amplitude (will appear on OUT1)
 OUTPUT_CHANNEL = 'out1'    # 'out1' or 'out2' - where to send AC signal
 PHASE_OFFSET = 0           # degrees - phase adjustment (0, 90, 180, 270)
 MEASUREMENT_TIME = 30.0     # seconds - how long to measure
@@ -297,23 +297,34 @@ class RedPitaya:
         ax4 = plt.subplot(3, 3, 4)
         ax4.plot(t, self.all_X, 'b-', linewidth=0.5)
         ax4.axhline(np.mean(self.all_X), color='r', linestyle='--', alpha=0.7,
-                   label=f'Mean: {np.mean(self.all_X):.4f}V')
+                    label=f'Mean: {np.mean(self.all_X):.4f}V')
         ax4.set_xlabel('Time (s)')
         ax4.set_ylabel('X (V)')
         ax4.set_title('In-phase (X) vs Time [iq2]')
         ax4.legend()
         ax4.grid(True)
 
+        # Zoom out in time: show full measurement
+        ax4.set_xlim(t[0], t[-1])
+        # Zoom out in voltage: larger margin for more space
+        margin_X = 0.5 * (np.max(self.all_X) - np.min(self.all_X))
+        ax4.set_ylim(np.min(self.all_X) - margin_X, np.max(self.all_X) + margin_X)
+
         # 5. Y vs Time
         ax5 = plt.subplot(3, 3, 5)
         ax5.plot(t, self.all_Y, 'r-', linewidth=0.5)
         ax5.axhline(np.mean(self.all_Y), color='b', linestyle='--', alpha=0.7,
-                   label=f'Mean: {np.mean(self.all_Y):.4f}V')
+                    label=f'Mean: {np.mean(self.all_Y):.4f}V')
         ax5.set_xlabel('Time (s)')
         ax5.set_ylabel('Y (V)')
         ax5.set_title('Quadrature (Y) vs Time [iq2_2]')
         ax5.legend()
         ax5.grid(True)
+
+        # Zoom out in time and voltage
+        ax5.set_xlim(t[0], t[-1])
+        margin_Y = 0.5 * (np.max(self.all_Y) - np.min(self.all_Y))
+        ax5.set_ylim(np.min(self.all_Y) - margin_Y, np.max(self.all_Y) + margin_Y)
 
         # 6. X vs Y (IQ plot)
         ax6 = plt.subplot(3, 3, 6)
@@ -331,23 +342,33 @@ class RedPitaya:
         ax7 = plt.subplot(3, 3, 7)
         ax7.plot(t, R, 'm-', linewidth=0.5)
         ax7.axhline(np.mean(R), color='b', linestyle='--', alpha=0.7,
-                   label=f'Mean: {np.mean(R):.4f}V')
+                    label=f'Mean: {np.mean(R):.4f}V')
         ax7.set_xlabel('Time (s)')
         ax7.set_ylabel('R (V)')
         ax7.set_title('Magnitude (R) vs Time')
         ax7.legend()
         ax7.grid(True)
 
+        # Zoom out in time and voltage (dynamic margin like X/Y)
+        ax7.set_xlim(t[0], t[-1])
+        margin_R = 0.5 * (np.max(R) - np.min(R))
+        ax7.set_ylim(np.min(R) - margin_R, np.max(R) + margin_R)
+
         # 8. Theta vs Time
         ax8 = plt.subplot(3, 3, 8)
         ax8.plot(t, Theta, 'c-', linewidth=0.5)
         ax8.axhline(np.mean(Theta), color='r', linestyle='--', alpha=0.7,
-                   label=f'Mean: {np.mean(Theta):.4f} rad')
+                    label=f'Mean: {np.mean(Theta):.4f} rad')
         ax8.set_xlabel('Time (s)')
         ax8.set_ylabel('Theta (rad)')
         ax8.set_title('Phase (Theta) vs Time')
         ax8.legend()
         ax8.grid(True)
+
+        # Zoom out in time and phase (dynamic margin)
+        ax8.set_xlim(t[0], t[-1])
+        margin_Theta = 0.5 * (np.max(Theta) - np.min(Theta))
+        ax8.set_ylim(np.min(Theta) - margin_Theta, np.max(Theta) + margin_Theta)
 
         # 9. R vs Theta
         ax9 = plt.subplot(3, 3, 9)
