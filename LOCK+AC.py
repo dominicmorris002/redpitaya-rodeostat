@@ -19,20 +19,20 @@ EXPECTED RESULTS (OUT1 → IN1, 0.4V sine @ 100Hz):
 # ============================================================
 # MEASUREMENT PARAMETERS - CHANGE THESE
 # ============================================================
-REF_FREQUENCY = 100        # Hz - AC excitation frequency
-REF_AMPLITUDE = 0.5        # V - AC signal amplitude (will appear on OUT1)
-OUTPUT_CHANNEL = 'out1'    # 'out1' or 'out2' - where to send AC signal
-PHASE_OFFSET = 0           # degrees - phase adjustment (0, 90, 180, 270)
-MEASUREMENT_TIME = 30.0     # seconds - how long to measure
+REF_FREQUENCY = 100  # Hz - AC excitation frequency
+REF_AMPLITUDE = 0.5  # V - AC signal amplitude (will appear on OUT1)
+OUTPUT_CHANNEL = 'out1'  # 'out1' or 'out2' - where to send AC signal
+PHASE_OFFSET = 0  # degrees - phase adjustment (0, 90, 180, 270)
+MEASUREMENT_TIME = 30.0  # seconds - how long to measure
 
 # LOCK-IN FILTER BANDWIDTH
-FILTER_BANDWIDTH = 10      # Hz - lower = cleaner, higher = faster response
+FILTER_BANDWIDTH = 10  # Hz - lower = cleaner, higher = faster response
 
 # AVERAGING
-AVERAGING_WINDOW = 1       # samples - set to 1 to see raw lock-in output first
+AVERAGING_WINDOW = 1  # samples - set to 1 to see raw lock-in output first
 
 # Data saving
-SAVE_DATA = False          # True = save to files, False = just show plots
+SAVE_DATA = False  # True = save to files, False = just show plots
 OUTPUT_DIRECTORY = 'test_data'
 
 # Advanced settings
@@ -50,15 +50,16 @@ import os
 
 N_FFT_SHOW = 10
 
+
 class RedPitaya:
     electrode_map = {'A': (False, False), 'B': (True, False),
                      'C': (False, True), 'D': (True, True)}
     current_range_map = {'10uA': (False, True, True, True),
-                        '100uA': (True, False, True, True),
-                        '1mA': (True, True, False, True),
-                        '10mA': (True, True, True, False)}
+                         '100uA': (True, False, True, True),
+                         '1mA': (True, True, False, True),
+                         '10mA': (True, True, True, False)}
     dac_gain_map = {'1X': (False, False), '5X': (False, True),
-                   '2X': (True, False), '10X': (True, True)}
+                    '2X': (True, False), '10X': (True, True)}
     current_scaling_map = {'10mA': 65, '1mA': 600, '100uA': 6000, '10uA': 60000}
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
@@ -82,7 +83,7 @@ class RedPitaya:
         print("Available scope inputs:", self.scope.inputs)
 
         # CORRECTED: For iq2 module, use iq2 (X) and iq2_2 (Y)
-        self.scope.input1 = 'iq2'    # X (in-phase)
+        self.scope.input1 = 'iq2'  # X (in-phase)
         self.scope.input2 = 'iq2_2'  # Y (quadrature)
         self.scope.decimation = DECIMATION
 
@@ -113,14 +114,14 @@ class RedPitaya:
         self.lockin.setup(
             frequency=self.ref_freq,
             bandwidth=filter_bw,
-            gain=0.0,              # No feedback
+            gain=0.0,  # No feedback
             phase=phase_setting,
-            acbandwidth=0,         # DC-coupled input
-            amplitude=ref_amp,     # THIS IS THE OUTPUT AMPLITUDE!
+            acbandwidth=0,  # DC-coupled input
+            amplitude=ref_amp,  # THIS IS THE OUTPUT AMPLITUDE!
             input='in1',
             output_direct=params['output_ref'],  # Send sine wave to OUT1/OUT2
             output_signal='quadrature',
-            quadrature_factor=1)   # No extra gain
+            quadrature_factor=1)  # No extra gain
 
         print(f"Lock-in setup: {self.ref_freq} Hz, Amplitude: {ref_amp}V")
         print(f"Filter BW: {filter_bw} Hz")
@@ -189,7 +190,7 @@ class RedPitaya:
 
         # Capture raw signals for plotting
         self.scope.input1 = 'out1'  # Reference signal from IQ module
-        self.scope.input2 = 'in1'   # Input signal
+        self.scope.input2 = 'in1'  # Input signal
         time.sleep(0.05)
         self.scope.single()
         out1_raw = np.array(self.scope._data_ch1_current)
@@ -254,9 +255,13 @@ class RedPitaya:
         print(f"X: DC={X_dc:.6f}V, AC={X_ac:.6f}V, AC/DC={X_ac / max(X_dc, 0.001):.3f}")
         print(f"Y: DC={Y_dc:.6f}V, AC={Y_ac:.6f}V, AC/DC={Y_ac / max(Y_dc, 0.001):.3f}")
 
-        if X_ac / max(X_dc, 0.001) > 0.5:
+        # FIXED WARNING LOGIC - Only change from original code
+        SIGNAL_THRESHOLD = 0.02  # 20mV absolute threshold
+
+        if X_dc > SIGNAL_THRESHOLD and X_ac / X_dc > 0.5:
             print("⚠ WARNING: X is oscillating! Should be flat for locked signal")
-        if Y_ac / max(Y_dc, 0.001) > 0.5:
+
+        if Y_dc > SIGNAL_THRESHOLD and Y_ac / Y_dc > 0.5:
             print("⚠ WARNING: Y is oscillating! Should be flat for locked signal")
 
         print("=" * 60)
@@ -330,7 +335,7 @@ class RedPitaya:
         ax6 = plt.subplot(3, 3, 6)
         ax6.plot(self.all_X, self.all_Y, 'g.', markersize=1, alpha=0.5)
         ax6.plot(np.mean(self.all_X), np.mean(self.all_Y), 'r+', markersize=15,
-                markeredgewidth=2, label='Mean')
+                 markeredgewidth=2, label='Mean')
         ax6.set_xlabel('X (V)')
         ax6.set_ylabel('Y (V)')
         ax6.set_title('IQ Plot (X vs Y)')
