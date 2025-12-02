@@ -1,24 +1,29 @@
 """
 Red Pitaya Lock-In Amplifier - CORRECTED VERSION
 
-SETUP: Connect OUT1 as Output Voltage Connect IN1 to the current TIA.
+SETUP: Connect OUT1 directly to IN1 with a cable
 
 IQ MODULE OUTPUTS:
 - For iq2 module: iq2 = X (in-phase), iq2_2 = Y (quadrature)
 - For iq0 module: iq0 = X (in-phase), iq0_2 = Y (quadrature)
 - For iq1 module: iq1 = X (in-phase), iq1_2 = Y (quadrature)
 
-
+EXPECTED RESULTS (OUT1 → IN1, 0.4V sine @ 100Hz):
+- X ≈ 0.2V (flat line) - half of amplitude
+- Y ≈ 0V (flat line)
+- R ≈ 0.2V (flat line) - half of amplitude
+- Theta ≈ 0 rad (flat line)
+- FFT peak at 0 Hz (locked!)
 """
 
 # ============================================================
 # MEASUREMENT PARAMETERS - CHANGE THESE
 # ============================================================
-REF_FREQUENCY = 500        # Hz - AC excitation frequency
-REF_AMPLITUDE = 0.02        # V - AC signal amplitude (will appear on OUT1)
+REF_FREQUENCY = 100        # Hz - AC excitation frequency
+REF_AMPLITUDE = 1        # V - AC signal amplitude (will appear on OUT1)
 OUTPUT_CHANNEL = 'out1'    # 'out1' or 'out2' - where to send AC signal
 PHASE_OFFSET = 0           # degrees - phase adjustment (0, 90, 180, 270)
-MEASUREMENT_TIME = 12.0     # seconds - how long to measure
+MEASUREMENT_TIME = 30.0     # seconds - how long to measure
 
 # LOCK-IN FILTER BANDWIDTH
 FILTER_BANDWIDTH = 10      # Hz - lower = cleaner, higher = faster response
@@ -27,7 +32,7 @@ FILTER_BANDWIDTH = 10      # Hz - lower = cleaner, higher = faster response
 AVERAGING_WINDOW = 1       # samples - set to 1 to see raw lock-in output first
 
 # Data saving
-SAVE_DATA = True          # True = save to files, False = just show plots
+SAVE_DATA = False          # True = save to files, False = just show plots
 OUTPUT_DIRECTORY = 'test_data'
 
 # Advanced settings
