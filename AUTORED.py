@@ -1,34 +1,40 @@
 """
 Red Pitaya Lock-In Amplifier - CORRECTED VERSION
 
-SETUP: Connect OUT1 as Output Voltage Connect IN1 to the current TIA.
+SETUP: Connect OUT1 directly to IN1 with a cable
 
 IQ MODULE OUTPUTS:
 - For iq2 module: iq2 = X (in-phase), iq2_2 = Y (quadrature)
 - For iq0 module: iq0 = X (in-phase), iq0_2 = Y (quadrature)
 - For iq1 module: iq1 = X (in-phase), iq1_2 = Y (quadrature)
 
-
+EXPECTED RESULTS (OUT1 → IN1, 0.4V sine @ 100Hz):
+- X ≈ 0.2V (flat line) - half of amplitude
+- Y ≈ 0V (flat line)
+- R ≈ 0.2V (flat line) - half of amplitude
+- Theta ≈ 0 rad (flat line)
+- FFT peak at 0 Hz (locked!)
 """
 
 # ============================================================
 # MEASUREMENT PARAMETERS - CHANGE THESE
 # ============================================================
-REF_FREQUENCY = 500        # Hz - AC excitation frequency
-REF_AMPLITUDE = 0.02        # V - AC signal amplitude (will appear on OUT1)
-OUTPUT_CHANNEL = 'out1'    # 'out1' or 'out2' - where to send AC signal
-PHASE_OFFSET = 0           # degrees - phase adjustment (0, 90, 180, 270)
-MEASUREMENT_TIME = 12.0     # seconds - how long to measure
+REF_FREQUENCY = 100  # Hz - AC excitation frequency
+REF_AMPLITUDE = 0.5  # V - AC signal amplitude (will appear on OUT1)
+OUTPUT_CHANNEL = 'out1'  # 'out1' or 'out2' - where to send AC signal
+PHASE_OFFSET = 0  # degrees - phase adjustment (0, 90, 180, 270)
+MEASUREMENT_TIME = 30.0  # seconds - how long to measure
 
 # LOCK-IN FILTER BANDWIDTH
-FILTER_BANDWIDTH = 10      # Hz - lower = cleaner, higher = faster response
+FILTER_BANDWIDTH = 10  # Hz - lower = cleaner, higher = faster response
 
 # AVERAGING
-AVERAGING_WINDOW = 1       # samples - set to 1 to see raw lock-in output first
+AVERAGING_WINDOW = 1  # samples - set to 1 to see raw lock-in output first
 
 # Data saving
-SAVE_DATA = True          # True = save to files, False = just show plots
-OUTPUT_DIRECTORY = 'test_data'
+SAVE_DATA = True  # True = save to files, False = just show plots
+OUTPUT_DIRECTORY = 'C:\\SEED 3.2 Data\\RedPitaya\\Test Data'  # CHANGE THIS to your directory
+FILE_NAME = 'RP_LockIn_Test'  # Base filename for saved data
 
 # Advanced settings
 DECIMATION = 8192
@@ -45,31 +51,16 @@ import os
 
 N_FFT_SHOW = 10
 
-def csvGenerate(dat, output_dir, base_filename):
-    """Create CSV files for each data type, matching old SEED system format"""
-    # Create a subfolder with the base filename
-    folder_path = os.path.join(output_dir, base_filename)
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
-    
-    # Save each array as a separate CSV file
-    for key in dat.keys():
-        csv_path = os.path.join(folder_path, f'{key}.csv')
-        with open(csv_path, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
-            writer.writerow(dat[key])
-    
-    print(f"CSV files saved to: {folder_path}")
 
 class RedPitaya:
     electrode_map = {'A': (False, False), 'B': (True, False),
                      'C': (False, True), 'D': (True, True)}
     current_range_map = {'10uA': (False, True, True, True),
-                        '100uA': (True, False, True, True),
-                        '1mA': (True, True, False, True),
-                        '10mA': (True, True, True, False)}
+                         '100uA': (True, False, True, True),
+                         '1mA': (True, True, False, True),
+                         '10mA': (True, True, True, False)}
     dac_gain_map = {'1X': (False, False), '5X': (False, True),
-                   '2X': (True, False), '10X': (True, True)}
+                    '2X': (True, False), '10X': (True, True)}
     current_scaling_map = {'10mA': 65, '1mA': 600, '100uA': 6000, '10uA': 60000}
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
@@ -93,7 +84,7 @@ class RedPitaya:
         print("Available scope inputs:", self.scope.inputs)
 
         # CORRECTED: For iq2 module, use iq2 (X) and iq2_2 (Y)
-        self.scope.input1 = 'iq2'    # X (in-phase)
+        self.scope.input1 = 'iq2'  # X (in-phase)
         self.scope.input2 = 'iq2_2'  # Y (quadrature)
         self.scope.decimation = DECIMATION
 
@@ -124,14 +115,14 @@ class RedPitaya:
         self.lockin.setup(
             frequency=self.ref_freq,
             bandwidth=filter_bw,
-            gain=0.0,              # No feedback
+            gain=0.0,  # No feedback
             phase=phase_setting,
-            acbandwidth=0,         # DC-coupled input
-            amplitude=ref_amp,     # THIS IS THE OUTPUT AMPLITUDE!
+            acbandwidth=0,  # DC-coupled input
+            amplitude=ref_amp,  # THIS IS THE OUTPUT AMPLITUDE!
             input='in1',
             output_direct=params['output_ref'],  # Send sine wave to OUT1/OUT2
             output_signal='quadrature',
-            quadrature_factor=1)   # No extra gain
+            quadrature_factor=1)  # No extra gain
 
         print(f"Lock-in setup: {self.ref_freq} Hz, Amplitude: {ref_amp}V")
         print(f"Filter BW: {filter_bw} Hz")
@@ -200,12 +191,23 @@ class RedPitaya:
 
         # Capture raw signals for plotting
         self.scope.input1 = 'out1'  # Reference signal from IQ module
-        self.scope.input2 = 'in1'   # Input signal
+        self.scope.input2 = 'in1'  # Input signal
         time.sleep(0.05)
         self.scope.single()
         out1_raw = np.array(self.scope._data_ch1_current)
         in1_raw = np.array(self.scope._data_ch2_current)
         t_raw = np.arange(len(out1_raw)) / self.sample_rate
+
+        # Create dcRamp array - continuous recording of IN1 voltage over time
+        # Resample in1_raw to match the time array length
+        if len(in1_raw) > len(t):
+            # Downsample in1_raw to match t
+            downsample_factor = len(in1_raw) // len(t)
+            in1_dcRamp = in1_raw[::downsample_factor][:len(t)]
+        else:
+            # Upsample by repeating values
+            repeat_factor = len(t) // len(in1_raw) + 1
+            in1_dcRamp = np.repeat(in1_raw, repeat_factor)[:len(t)]
 
         # Switch back to lock-in outputs
         self.scope.input1 = 'iq2'
@@ -265,18 +267,44 @@ class RedPitaya:
         print(f"X: DC={X_dc:.6f}V, AC={X_ac:.6f}V, AC/DC={X_ac / max(X_dc, 0.001):.3f}")
         print(f"Y: DC={Y_dc:.6f}V, AC={Y_ac:.6f}V, AC/DC={Y_ac / max(Y_dc, 0.001):.3f}")
 
-        if X_ac / max(X_dc, 0.001) > 0.5:
+        # FIXED WARNING LOGIC - Only change from original code
+        SIGNAL_THRESHOLD = 0.02  # 20mV absolute threshold
+
+        if X_dc > SIGNAL_THRESHOLD and X_ac / X_dc > 0.5:
             print("⚠ WARNING: X is oscillating! Should be flat for locked signal")
-        if Y_ac / max(Y_dc, 0.001) > 0.5:
+
+        if Y_dc > SIGNAL_THRESHOLD and Y_ac / Y_dc > 0.5:
             print("⚠ WARNING: Y is oscillating! Should be flat for locked signal")
 
         print("=" * 60)
 
-        # Create comprehensive plot
-        fig = plt.figure(figsize=(16, 10))
+        # ============================================================
+        # SAVE DATA (like old three-hole system)
+        # ============================================================
+        if params['save_file']:
+            self.save_data_like_old_system(params, t, R, Theta, self.all_X, self.all_Y,
+                                           out1_raw, in1_raw, in1_dcRamp, t_raw,
+                                           freqs_lock, psd_lock)
 
-        # 1. OUT1 (Reference Signal)
-        ax1 = plt.subplot(3, 3, 1)
+        # Create comprehensive plot
+        fig = plt.figure(figsize=(18, 10))
+
+        # NEW: Add old-style plot at top (like your three-hole system)
+        # Signal and DC Ramp vs Time (dual Y-axis)
+        ax_old1 = plt.subplot(3, 3, 1)
+        ax_old1_twin = ax_old1.twinx()
+        ax_old1.plot(t, R, color=(31 / 255., 119 / 255., 180 / 255.), linewidth=1, label='Signal (R)')
+        ax_old1_twin.plot(t, in1_dcRamp,
+                          color=(255 / 255., 127 / 255., 14 / 255.), linewidth=1, label='IN1 Voltage')
+        ax_old1.set_xlabel('Time (s)')
+        ax_old1.set_ylabel('Signal (V)', color=(31 / 255., 119 / 255., 180 / 255.))
+        ax_old1_twin.set_ylabel('IN1 Voltage (V)', color=(255 / 255., 127 / 255., 14 / 255.))
+        ax_old1.set_title('Lock-in Signal + IN1 Voltage (Old Style)')
+        ax_old1.grid(True)
+
+        # EXISTING PLOTS (starting from position 2)
+        # 2. OUT1 (Reference Signal)
+        ax1 = plt.subplot(3, 3, 2)
         n_periods = 5
         n_samples_plot = int(n_periods * self.sample_rate / self.ref_freq)
         n_samples_plot = min(n_samples_plot, len(out1_raw))
@@ -286,16 +314,16 @@ class RedPitaya:
         ax1.set_title(f'Reference Signal (OUT1) @ {self.ref_freq} Hz')
         ax1.grid(True)
 
-        # 2. IN1 (Input Signal)
-        ax2 = plt.subplot(3, 3, 2)
+        # 3. IN1 (Input Signal)
+        ax2 = plt.subplot(3, 3, 3)
         ax2.plot(t_raw[:n_samples_plot] * 1000, in1_raw[:n_samples_plot], 'r-', linewidth=1)
         ax2.set_xlabel('Time (ms)')
         ax2.set_ylabel('IN1 (V)')
         ax2.set_title('Input Signal (IN1)')
         ax2.grid(True)
 
-        # 3. FFT Spectrum
-        ax3 = plt.subplot(3, 3, 3)
+        # 4. FFT Spectrum
+        ax3 = plt.subplot(3, 3, 4)
         ax3.semilogy(freqs_lock, psd_lock, label='Lock-in PSD')
         ax3.axvline(0, color='r', linestyle='--', alpha=0.5, label='0 Hz (target)')
         ax3.set_xlabel('Frequency (Hz)')
@@ -304,33 +332,39 @@ class RedPitaya:
         ax3.legend()
         ax3.grid(True)
 
-        # 4. X vs Time
-        ax4 = plt.subplot(3, 3, 4)
+        # 5. X vs Time
+        ax4 = plt.subplot(3, 3, 5)
         ax4.plot(t, self.all_X, 'b-', linewidth=0.5)
         ax4.axhline(np.mean(self.all_X), color='r', linestyle='--', alpha=0.7,
-                   label=f'Mean: {np.mean(self.all_X):.4f}V')
+                    label=f'Mean: {np.mean(self.all_X):.4f}V')
         ax4.set_xlabel('Time (s)')
         ax4.set_ylabel('X (V)')
         ax4.set_title('In-phase (X) vs Time [iq2]')
         ax4.legend()
         ax4.grid(True)
+        ax4.set_xlim(t[0], t[-1])
+        margin_X = 0.5 * (np.max(self.all_X) - np.min(self.all_X))
+        ax4.set_ylim(np.min(self.all_X) - margin_X, np.max(self.all_X) + margin_X)
 
-        # 5. Y vs Time
-        ax5 = plt.subplot(3, 3, 5)
+        # 6. Y vs Time
+        ax5 = plt.subplot(3, 3, 6)
         ax5.plot(t, self.all_Y, 'r-', linewidth=0.5)
         ax5.axhline(np.mean(self.all_Y), color='b', linestyle='--', alpha=0.7,
-                   label=f'Mean: {np.mean(self.all_Y):.4f}V')
+                    label=f'Mean: {np.mean(self.all_Y):.4f}V')
         ax5.set_xlabel('Time (s)')
         ax5.set_ylabel('Y (V)')
         ax5.set_title('Quadrature (Y) vs Time [iq2_2]')
         ax5.legend()
         ax5.grid(True)
+        ax5.set_xlim(t[0], t[-1])
+        margin_Y = 0.5 * (np.max(self.all_Y) - np.min(self.all_Y))
+        ax5.set_ylim(np.min(self.all_Y) - margin_Y, np.max(self.all_Y) + margin_Y)
 
-        # 6. X vs Y (IQ plot)
-        ax6 = plt.subplot(3, 3, 6)
+        # 7. X vs Y (IQ plot)
+        ax6 = plt.subplot(3, 3, 7)
         ax6.plot(self.all_X, self.all_Y, 'g.', markersize=1, alpha=0.5)
         ax6.plot(np.mean(self.all_X), np.mean(self.all_Y), 'r+', markersize=15,
-                markeredgewidth=2, label='Mean')
+                 markeredgewidth=2, label='Mean')
         ax6.set_xlabel('X (V)')
         ax6.set_ylabel('Y (V)')
         ax6.set_title('IQ Plot (X vs Y)')
@@ -338,76 +372,107 @@ class RedPitaya:
         ax6.grid(True)
         ax6.axis('equal')
 
-        # 7. R vs Time
-        ax7 = plt.subplot(3, 3, 7)
+        # 8. R vs Time
+        ax7 = plt.subplot(3, 3, 8)
         ax7.plot(t, R, 'm-', linewidth=0.5)
         ax7.axhline(np.mean(R), color='b', linestyle='--', alpha=0.7,
-                   label=f'Mean: {np.mean(R):.4f}V')
+                    label=f'Mean: {np.mean(R):.4f}V')
         ax7.set_xlabel('Time (s)')
         ax7.set_ylabel('R (V)')
         ax7.set_title('Magnitude (R) vs Time')
         ax7.legend()
         ax7.grid(True)
+        ax7.set_xlim(t[0], t[-1])
+        margin_R = 0.5 * (np.max(R) - np.min(R))
+        ax7.set_ylim(np.min(R) - margin_R, np.max(R) + margin_R)
 
-        # 8. Theta vs Time
-        ax8 = plt.subplot(3, 3, 8)
+        # 9. Theta vs Time
+        ax8 = plt.subplot(3, 3, 9)
         ax8.plot(t, Theta, 'c-', linewidth=0.5)
         ax8.axhline(np.mean(Theta), color='r', linestyle='--', alpha=0.7,
-                   label=f'Mean: {np.mean(Theta):.4f} rad')
+                    label=f'Mean: {np.mean(Theta):.4f} rad')
         ax8.set_xlabel('Time (s)')
         ax8.set_ylabel('Theta (rad)')
         ax8.set_title('Phase (Theta) vs Time')
         ax8.legend()
         ax8.grid(True)
-
-        # 9. R vs Theta
-        ax9 = plt.subplot(3, 3, 9)
-        ax9.plot(Theta, R, 'purple', marker='.', markersize=1, linestyle='', alpha=0.5)
-        ax9.axhline(np.mean(R), color='b', linestyle='--', alpha=0.5)
-        ax9.axvline(np.mean(Theta), color='r', linestyle='--', alpha=0.5)
-        ax9.set_xlabel('Theta (rad)')
-        ax9.set_ylabel('R (V)')
-        ax9.set_title('R vs Theta')
-        ax9.grid(True)
+        ax8.set_xlim(t[0], t[-1])
+        margin_Theta = 0.5 * (np.max(Theta) - np.min(Theta))
+        ax8.set_ylim(np.min(Theta) - margin_Theta, np.max(Theta) + margin_Theta)
 
         plt.tight_layout()
 
         if params['save_file']:
-            if not os.path.exists(self.output_dir):
-                os.makedirs(self.output_dir)
-            
-            base_filename = f'lockin_results_rf_{self.ref_freq}'
-            
-            # Save NPZ file (like old system)
-            npz_path = os.path.join(self.output_dir, f'{base_filename}.npz')
-            np.savez(npz_path, 
-                     magnitude=R, 
-                     phase=Theta, 
-                     time=t,
-                     signal=self.all_X,
-                     dcRamp=np.zeros_like(t),
-                     X=self.all_X,
-                     Y=self.all_Y)
-            print(f"NPZ file saved: {npz_path}")
-            
-            # Save individual CSV files in subfolder (like old system)
-            dat = {
-                'magnitude': R,
-                'phase': Theta,
-                'time': t,
-                'signal': self.all_X,
-                'dcRamp': np.zeros_like(t),
-                'X': self.all_X,
-                'Y': self.all_Y
-            }
-            csvGenerate(dat, self.output_dir, base_filename)
-            
-            # Save the plot
-            img_path = os.path.join(self.output_dir, f'{base_filename}.png')
+            img_path = os.path.join(self.output_dir, params['filename'],
+                                    f"{params['filename']}_all_plots.png")
             plt.savefig(img_path, dpi=150)
-            print(f"Plot saved: {img_path}")
-        else:
-            plt.show()
+            print(f"Saved comprehensive plot: {img_path}")
+
+        plt.show()
+
+    def save_data_like_old_system(self, params, time, mag, phase, X, Y,
+                                  out1_raw, in1_raw, dcRamp, t_raw, freqs, psd):
+        """
+        Save data in the same format as the old three-hole system:
+        - Creates a folder with the filename
+        - Saves NPZ file with all data
+        - Saves individual CSV files for each variable
+        - Saves PNG plots
+        """
+        filename = params['filename']
+        base_dir = self.output_dir
+
+        # Create base directory if it doesn't exist
+        if not os.path.exists(base_dir):
+            os.makedirs(base_dir)
+            print(f"Created base directory: {base_dir}")
+
+        # Save NPZ in base directory (like old system)
+        npz_path = os.path.join(base_dir, f'{filename}.npz')
+        np.savez(npz_path,
+                 mag=mag,
+                 dcRamp=dcRamp,
+                 phase=phase,
+                 time=time,
+                 signal=mag,  # Use R as signal
+                 X=X,
+                 Y=Y,
+                 out1=out1_raw,
+                 in1=in1_raw,
+                 freqs=freqs,
+                 psd=psd)
+        print(f"Saved NPZ file: {npz_path}")
+
+        # Create subdirectory for CSVs
+        csv_dir = os.path.join(base_dir, filename)
+        if not os.path.exists(csv_dir):
+            os.makedirs(csv_dir)
+            print(f"Created CSV directory: {csv_dir}")
+
+        # Save individual CSV files (like old system)
+        data_dict = {
+            'magnitude': mag,
+            'dcRamp': dcRamp[:len(time)],  # Match length
+            'phase': phase,
+            'time': time,
+            'signal': mag,
+            'X': X,
+            'Y': Y
+        }
+
+        for key, data in data_dict.items():
+            csv_path = os.path.join(csv_dir, f'{key}.csv')
+            with open(csv_path, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile, delimiter=',', quotechar='|',
+                                    quoting=csv.QUOTE_MINIMAL)
+                # Write as single row (like old system)
+                writer.writerow(data)
+            print(f"Saved CSV: {csv_path}")
+
+        print(f"\n✓ All data saved in format matching old three-hole system!")
+        print(f"  Base directory: {base_dir}")
+        print(f"  NPZ file: {filename}.npz")
+        print(f"  CSV folder: {filename}/")
 
 
 if __name__ == '__main__':
@@ -422,6 +487,7 @@ if __name__ == '__main__':
         'filter_bandwidth': FILTER_BANDWIDTH,
         'averaging_window': AVERAGING_WINDOW,
         'output_dir': OUTPUT_DIRECTORY,
+        'filename': FILE_NAME,
         'save_file': SAVE_DATA,
         'fft': SHOW_FFT,
     }
@@ -429,12 +495,15 @@ if __name__ == '__main__':
     print("=" * 60)
     print("RED PITAYA LOCK-IN AMPLIFIER")
     print("=" * 60)
-    print("SETUP: Connect OUT1 directly to IN1")
+    print("SETUP: Connect OUT1 directly to IN1 (for testing)")
     print("=" * 60)
     print(f"Reference: {REF_FREQUENCY} Hz @ {REF_AMPLITUDE} V on {OUTPUT_CHANNEL}")
     print(f"Filter Bandwidth: {FILTER_BANDWIDTH} Hz")
     print(f"Measurement Time: {MEASUREMENT_TIME} s")
     print(f"Averaging Window: {AVERAGING_WINDOW} samples")
+    if SAVE_DATA:
+        print(f"Save Directory: {OUTPUT_DIRECTORY}")
+        print(f"Filename: {FILE_NAME}")
     print("=" * 60)
     print("Expected for direct OUT1→IN1 connection:")
     print(f"  X = {REF_AMPLITUDE / 2:.3f} V (in-phase)")
