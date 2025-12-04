@@ -1,7 +1,9 @@
 """
 Red Pitaya Lock-In Amplifier - CORRECTED VERSION
 
-SETUP: Connect OUT1 directly to IN1 with a cable
+SETUP: 
+- Connect OUT1 directly to IN1 with a cable (for LIA signal)
+- Connect your DC ramp signal to IN2 (for voltage monitoring)
 
 IQ MODULE OUTPUTS:
 - For iq2 module: iq2 = X (in-phase), iq2_2 = Y (quadrature)
@@ -189,25 +191,26 @@ class RedPitaya:
         # Time array
         t = np.arange(start=0, stop=len(self.all_X) / self.sample_rate, step=1 / self.sample_rate)
 
-        # Capture raw signals for plotting
+        # MODIFIED: Capture raw signals for plotting
+        # OUT1 = reference signal, IN2 = DC ramp voltage
         self.scope.input1 = 'out1'  # Reference signal from IQ module
-        self.scope.input2 = 'in1'  # Input signal
+        self.scope.input2 = 'in2'   # DC ramp voltage (CHANGED FROM in1)
         time.sleep(0.05)
         self.scope.single()
         out1_raw = np.array(self.scope._data_ch1_current)
-        in1_raw = np.array(self.scope._data_ch2_current)
+        in2_raw = np.array(self.scope._data_ch2_current)  # CHANGED: now reading IN2
         t_raw = np.arange(len(out1_raw)) / self.sample_rate
 
-        # Create dcRamp array - continuous recording of IN1 voltage over time
-        # Resample in1_raw to match the time array length
-        if len(in1_raw) > len(t):
-            # Downsample in1_raw to match t
-            downsample_factor = len(in1_raw) // len(t)
-            in1_dcRamp = in1_raw[::downsample_factor][:len(t)]
+        # Create dcRamp array - continuous recording of IN2 voltage over time
+        # Resample in2_raw to match the time array length
+        if len(in2_raw) > len(t):
+            # Downsample in2_raw to match t
+            downsample_factor = len(in2_raw) // len(t)
+            in2_dcRamp = in2_raw[::downsample_factor][:len(t)]
         else:
             # Upsample by repeating values
-            repeat_factor = len(t) // len(in1_raw) + 1
-            in1_dcRamp = np.repeat(in1_raw, repeat_factor)[:len(t)]
+            repeat_factor = len(t) // len(in2_raw) + 1
+            in2_dcRamp = np.repeat(in2_raw, repeat_factor)[:len(t)]
 
         # Switch back to lock-in outputs
         self.scope.input1 = 'iq2'
@@ -267,7 +270,6 @@ class RedPitaya:
         print(f"X: DC={X_dc:.6f}V, AC={X_ac:.6f}V, AC/DC={X_ac / max(X_dc, 0.001):.3f}")
         print(f"Y: DC={Y_dc:.6f}V, AC={Y_ac:.6f}V, AC/DC={Y_ac / max(Y_dc, 0.001):.3f}")
 
-        # FIXED WARNING LOGIC - Only change from original code
         SIGNAL_THRESHOLD = 0.02  # 20mV absolute threshold
 
         if X_dc > SIGNAL_THRESHOLD and X_ac / X_dc > 0.5:
@@ -283,27 +285,25 @@ class RedPitaya:
         # ============================================================
         if params['save_file']:
             self.save_data_like_old_system(params, t, R, Theta, self.all_X, self.all_Y,
-                                           out1_raw, in1_raw, in1_dcRamp, t_raw,
+                                           out1_raw, in2_raw, in2_dcRamp, t_raw,
                                            freqs_lock, psd_lock)
 
         # Create comprehensive plot
         fig = plt.figure(figsize=(18, 10))
 
-        # NEW: Add old-style plot at top (like your three-hole system)
         # Signal and DC Ramp vs Time (dual Y-axis)
         ax_old1 = plt.subplot(3, 3, 1)
         ax_old1_twin = ax_old1.twinx()
         ax_old1.plot(t, R, color=(31 / 255., 119 / 255., 180 / 255.), linewidth=1, label='Signal (R)')
-        ax_old1_twin.plot(t, in1_dcRamp,
-                          color=(255 / 255., 127 / 255., 14 / 255.), linewidth=1, label='IN1 Voltage')
+        ax_old1_twin.plot(t, in2_dcRamp,
+                          color=(255 / 255., 127 / 255., 14 / 255.), linewidth=1, label='IN2 Voltage')
         ax_old1.set_xlabel('Time (s)')
         ax_old1.set_ylabel('Signal (V)', color=(31 / 255., 119 / 255., 180 / 255.))
-        ax_old1_twin.set_ylabel('IN1 Voltage (V)', color=(255 / 255., 127 / 255., 14 / 255.))
-        ax_old1.set_title('Lock-in Signal + IN1 Voltage (Old Style)')
+        ax_old1_twin.set_ylabel('IN2 Voltage (V)', color=(255 / 255., 127 / 255., 14 / 255.))
+        ax_old1.set_title('Lock-in Signal + IN2 Voltage (Old Style)')
         ax_old1.grid(True)
 
-        # EXISTING PLOTS (starting from position 2)
-        # 2. OUT1 (Reference Signal)
+        # OUT1 (Reference Signal)
         ax1 = plt.subplot(3, 3, 2)
         n_periods = 5
         n_samples_plot = int(n_periods * self.sample_rate / self.ref_freq)
@@ -314,15 +314,15 @@ class RedPitaya:
         ax1.set_title(f'Reference Signal (OUT1) @ {self.ref_freq} Hz')
         ax1.grid(True)
 
-        # 3. IN1 (Input Signal)
+        # IN2 (DC Ramp Signal) - CHANGED
         ax2 = plt.subplot(3, 3, 3)
-        ax2.plot(t_raw[:n_samples_plot] * 1000, in1_raw[:n_samples_plot], 'r-', linewidth=1)
+        ax2.plot(t_raw[:n_samples_plot] * 1000, in2_raw[:n_samples_plot], 'r-', linewidth=1)
         ax2.set_xlabel('Time (ms)')
-        ax2.set_ylabel('IN1 (V)')
-        ax2.set_title('Input Signal (IN1)')
+        ax2.set_ylabel('IN2 (V)')
+        ax2.set_title('DC Ramp Signal (IN2)')  # Updated title
         ax2.grid(True)
 
-        # 4. FFT Spectrum
+        # FFT Spectrum
         ax3 = plt.subplot(3, 3, 4)
         ax3.semilogy(freqs_lock, psd_lock, label='Lock-in PSD')
         ax3.axvline(0, color='r', linestyle='--', alpha=0.5, label='0 Hz (target)')
@@ -332,7 +332,7 @@ class RedPitaya:
         ax3.legend()
         ax3.grid(True)
 
-        # 5. X vs Time
+        # X vs Time
         ax4 = plt.subplot(3, 3, 5)
         ax4.plot(t, self.all_X, 'b-', linewidth=0.5)
         ax4.axhline(np.mean(self.all_X), color='r', linestyle='--', alpha=0.7,
@@ -346,7 +346,7 @@ class RedPitaya:
         margin_X = 0.5 * (np.max(self.all_X) - np.min(self.all_X))
         ax4.set_ylim(np.min(self.all_X) - margin_X, np.max(self.all_X) + margin_X)
 
-        # 6. Y vs Time
+        # Y vs Time
         ax5 = plt.subplot(3, 3, 6)
         ax5.plot(t, self.all_Y, 'r-', linewidth=0.5)
         ax5.axhline(np.mean(self.all_Y), color='b', linestyle='--', alpha=0.7,
@@ -360,7 +360,7 @@ class RedPitaya:
         margin_Y = 0.5 * (np.max(self.all_Y) - np.min(self.all_Y))
         ax5.set_ylim(np.min(self.all_Y) - margin_Y, np.max(self.all_Y) + margin_Y)
 
-        # 7. X vs Y (IQ plot)
+        # X vs Y (IQ plot)
         ax6 = plt.subplot(3, 3, 7)
         ax6.plot(self.all_X, self.all_Y, 'g.', markersize=1, alpha=0.5)
         ax6.plot(np.mean(self.all_X), np.mean(self.all_Y), 'r+', markersize=15,
@@ -372,7 +372,7 @@ class RedPitaya:
         ax6.grid(True)
         ax6.axis('equal')
 
-        # 8. R vs Time
+        # R vs Time
         ax7 = plt.subplot(3, 3, 8)
         ax7.plot(t, R, 'm-', linewidth=0.5)
         ax7.axhline(np.mean(R), color='b', linestyle='--', alpha=0.7,
@@ -386,7 +386,7 @@ class RedPitaya:
         margin_R = 0.5 * (np.max(R) - np.min(R))
         ax7.set_ylim(np.min(R) - margin_R, np.max(R) + margin_R)
 
-        # 9. Theta vs Time
+        # Theta vs Time
         ax8 = plt.subplot(3, 3, 9)
         ax8.plot(t, Theta, 'c-', linewidth=0.5)
         ax8.axhline(np.mean(Theta), color='r', linestyle='--', alpha=0.7,
@@ -411,7 +411,7 @@ class RedPitaya:
         plt.show()
 
     def save_data_like_old_system(self, params, time, mag, phase, X, Y,
-                                  out1_raw, in1_raw, dcRamp, t_raw, freqs, psd):
+                                  out1_raw, in2_raw, dcRamp, t_raw, freqs, psd):
         """
         Save data in the same format as the old three-hole system:
         - Creates a folder with the filename
@@ -438,7 +438,7 @@ class RedPitaya:
                  X=X,
                  Y=Y,
                  out1=out1_raw,
-                 in1=in1_raw,
+                 in2=in2_raw,  # CHANGED: now saving IN2
                  freqs=freqs,
                  psd=psd)
         print(f"Saved NPZ file: {npz_path}")
@@ -495,7 +495,9 @@ if __name__ == '__main__':
     print("=" * 60)
     print("RED PITAYA LOCK-IN AMPLIFIER")
     print("=" * 60)
-    print("SETUP: Connect OUT1 directly to IN1 (for testing)")
+    print("SETUP:")
+    print("  - Connect OUT1 to IN1 (for LIA signal)")
+    print("  - Connect DC ramp to IN2 (for voltage monitoring)")
     print("=" * 60)
     print(f"Reference: {REF_FREQUENCY} Hz @ {REF_AMPLITUDE} V on {OUTPUT_CHANNEL}")
     print(f"Filter Bandwidth: {FILTER_BANDWIDTH} Hz")
