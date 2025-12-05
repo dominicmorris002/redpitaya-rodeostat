@@ -268,6 +268,7 @@ class RedPitaya:
 
         # Create comprehensive plot
         fig = plt.figure(figsize=(16, 10))
+        ZoomOut_Amount = 5
 
         # 1. OUT1 (Reference Signal)
         ax1 = plt.subplot(3, 3, 1)
@@ -312,7 +313,7 @@ class RedPitaya:
         # Zoom out in time: show full measurement
         ax4.set_xlim(t[0], t[-1])
         # Zoom out in voltage: larger margin for more space
-        margin_X = 0.5 * (np.max(self.all_X) - np.min(self.all_X))
+        margin_X = ZoomOut_Amount * (np.max(self.all_X) - np.min(self.all_X))
         ax4.set_ylim(np.min(self.all_X) - margin_X, np.max(self.all_X) + margin_X)
 
         # 5. Y vs Time
@@ -328,7 +329,7 @@ class RedPitaya:
 
         # Zoom out in time and voltage
         ax5.set_xlim(t[0], t[-1])
-        margin_Y = 0.5 * (np.max(self.all_Y) - np.min(self.all_Y))
+        margin_Y = ZoomOut_Amount * (np.max(self.all_Y) - np.min(self.all_Y))
         ax5.set_ylim(np.min(self.all_Y) - margin_Y, np.max(self.all_Y) + margin_Y)
 
         # 6. X vs Y (IQ plot)
@@ -356,7 +357,7 @@ class RedPitaya:
 
         # Zoom out in time and voltage (dynamic margin like X/Y)
         ax7.set_xlim(t[0], t[-1])
-        margin_R = 0.5 * (np.max(R) - np.min(R))
+        margin_R = ZoomOut_Amount * (np.max(R) - np.min(R))
         ax7.set_ylim(np.min(R) - margin_R, np.max(R) + margin_R)
 
         # 8. Theta vs Time
@@ -372,7 +373,7 @@ class RedPitaya:
 
         # Zoom out in time and phase (dynamic margin)
         ax8.set_xlim(t[0], t[-1])
-        margin_Theta = 0.5 * (np.max(Theta) - np.min(Theta))
+        margin_Theta = ZoomOut_Amount * (np.max(Theta) - np.min(Theta))
         ax8.set_ylim(np.min(Theta) - margin_Theta, np.max(Theta) + margin_Theta)
 
         # 9. R vs Theta
