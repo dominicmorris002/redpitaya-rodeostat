@@ -1,19 +1,24 @@
 """
-Red Pitaya Lock-In Amplifier - CORRECTED VERSION
+Red Pitaya Lock-In Amplifier - WITH TIMESTAMP SYNCHRONIZATION
 
 SETUP: Connect OUT1 directly to IN1 with a cable
 
+This version adds precise timestamps to every sample for easy synchronization
+with external data acquisition systems (e.g., NI-DAQ capturing Autolab data).
+
 IQ MODULE OUTPUTS:
 - For iq2 module: iq2 = X (in-phase), iq2_2 = Y (quadrature)
-- For iq0 module: iq0 = X (in-phase), iq0_2 = Y (quadrature)
-- For iq1 module: iq1 = X (in-phase), iq1_2 = Y (quadrature)
 
-EXPECTED RESULTS (OUT1 → IN1, 0.4V sine @ 100Hz):
-- X ≈ 0.2V (flat line) - half of amplitude
+EXPECTED RESULTS (OUT1 → IN1, 0.5V sine @ 100Hz):
+- X ≈ 0.25V (flat line) - half of amplitude
 - Y ≈ 0V (flat line)
-- R ≈ 0.2V (flat line) - half of amplitude
+- R ≈ 0.25V (flat line) - half of amplitude
 - Theta ≈ 0 rad (flat line)
 - FFT peak at 0 Hz (locked!)
+
+SYNCHRONIZATION:
+- Saves CSV with absolute timestamps (Unix time)
+- Can be merged with NI-DAQ data using timestamp matching
 """
 
 # ============================================================
@@ -32,12 +37,15 @@ FILTER_BANDWIDTH = 10  # Hz - lower = cleaner, higher = faster response
 AVERAGING_WINDOW = 1  # samples - set to 1 to see raw lock-in output first
 
 # Data saving
-SAVE_DATA = False  # True = save to files, False = just show plots
+SAVE_DATA = True  # True = save to files, False = just show plots
 OUTPUT_DIRECTORY = 'test_data'
 
 # Advanced settings
 DECIMATION = 8192
 SHOW_FFT = True
+
+# Synchronization settings
+SAVE_TIMESTAMPS = True  # Save absolute timestamps for sync with NI-DAQ
 # ============================================================
 
 import math
@@ -47,6 +55,7 @@ from matplotlib import pyplot as plt
 import time
 import csv
 import os
+from datetime import datetime
 
 N_FFT_SHOW = 10
 
@@ -74,6 +83,11 @@ class RedPitaya:
         self.all_X = []
         self.lockin_Y = []
         self.all_Y = []
+
+        # NEW: Store capture timestamps
+        self.capture_timestamps = []
+        self.acquisition_start_time = None
+
         self.pid = self.rp_modules.pid0
         self.kp = self.pid.p
         self.ki = self.pid.i
@@ -131,13 +145,18 @@ class RedPitaya:
         print(f"Scope reading: iq2 (X) and iq2_2 (Y)")
 
     def capture_lockin(self):
-        """Captures scope data and appends to X and Y arrays"""
+        """Captures scope data and appends to X and Y arrays with timestamps"""
+        # NEW: Record timestamp at moment of capture
+        capture_time = time.time()
+
         self.scope.single()
         ch1 = np.array(self.scope._data_ch1_current)  # iq2 = X (in-phase)
         ch2 = np.array(self.scope._data_ch2_current)  # iq2_2 = Y (quadrature)
 
         self.lockin_X.append(ch1)
         self.lockin_Y.append(ch2)
+        self.capture_timestamps.append(capture_time)
+
         return ch1, ch2
 
     def see_fft(self):
@@ -167,6 +186,11 @@ class RedPitaya:
         print("Waiting for lock-in to settle...")
         time.sleep(0.5)
 
+        # NEW: Record absolute start time
+        self.acquisition_start_time = time.time()
+        print(
+            f"\n✓ Acquisition started at: {datetime.fromtimestamp(self.acquisition_start_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
+
         loop_start = time.time()
         while (time.time() - loop_start) < timeout:
             self.capture_lockin()
@@ -174,19 +198,39 @@ class RedPitaya:
         self.all_X = np.array(np.concatenate(self.lockin_X))
         self.all_Y = np.array(np.concatenate(self.lockin_Y))
 
+        # NEW: Generate per-sample timestamps
+        # Each capture has multiple samples, need to interpolate timestamps
+        samples_per_capture = len(self.lockin_X[0])
+        total_samples = len(self.all_X)
+
+        # Create timestamp array for each sample
+        self.sample_timestamps = np.zeros(total_samples)
+        sample_idx = 0
+
+        for i, capture_time in enumerate(self.capture_timestamps):
+            n_samples = len(self.lockin_X[i])
+            # Interpolate timestamps for samples in this capture
+            capture_duration = n_samples / self.sample_rate
+            sample_times = np.linspace(0, capture_duration, n_samples, endpoint=False)
+
+            self.sample_timestamps[sample_idx:sample_idx + n_samples] = capture_time + sample_times
+            sample_idx += n_samples
+
         # Apply moving average filter
         averaging_window = params.get('averaging_window', 1)
 
         if averaging_window > 1:
             self.all_X = np.convolve(self.all_X, np.ones(averaging_window) / averaging_window, mode='valid')
             self.all_Y = np.convolve(self.all_Y, np.ones(averaging_window) / averaging_window, mode='valid')
+            # Also trim timestamps to match filtered data
+            self.sample_timestamps = self.sample_timestamps[:len(self.all_X)]
             print(f"Applied {averaging_window}-sample moving average filter")
 
         R = np.sqrt(self.all_X ** 2 + self.all_Y ** 2)
         Theta = np.arctan2(self.all_Y, self.all_X)
 
-        # Time array
-        t = np.arange(start=0, stop=len(self.all_X) / self.sample_rate, step=1 / self.sample_rate)
+        # Time array (relative to start)
+        t = self.sample_timestamps - self.acquisition_start_time
 
         # Capture raw signals for plotting
         self.scope.input1 = 'out1'  # Reference signal from IQ module
@@ -225,7 +269,15 @@ class RedPitaya:
 
         print(f"Sample Rate: {self.sample_rate:.2f} Hz")
         print(f"Total Samples: {len(self.all_X)}")
-        print(f"Measurement Duration: {len(self.all_X) / self.sample_rate:.3f} seconds")
+        print(f"Measurement Duration: {t[-1]:.3f} seconds")
+
+        # NEW: Print timestamp info
+        print("-" * 60)
+        print("TIMESTAMP INFORMATION:")
+        print(f"Start time: {datetime.fromtimestamp(self.sample_timestamps[0]).strftime('%Y-%m-%d %H:%M:%S.%f')}")
+        print(f"End time:   {datetime.fromtimestamp(self.sample_timestamps[-1]).strftime('%Y-%m-%d %H:%M:%S.%f')}")
+        print(f"Duration:   {self.sample_timestamps[-1] - self.sample_timestamps[0]:.3f} seconds")
+
         print("-" * 60)
         print(f"Mean R: {np.mean(R):.6f} V ± {np.std(R):.6f} V")
         print(f"SNR (R): {np.mean(R) / (np.std(R) + 1e-9):.2f} (mean/std)")
@@ -391,11 +443,38 @@ class RedPitaya:
         if params['save_file']:
             if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
-            img_path = os.path.join(self.output_dir, f'lockin_results_rf_{self.ref_freq}.png')
-            data = np.column_stack((R, Theta, self.all_X, self.all_Y))
-            csv_path = os.path.join(self.output_dir, f'lockin_results_rf_{self.ref_freq}.csv')
-            np.savetxt(csv_path, data, delimiter=",", header="R,Theta,X,Y", comments='', fmt='%.6f')
+
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            # Save plot
+            img_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.png')
             plt.savefig(img_path, dpi=150)
+            print(f"\n✓ Plot saved: {img_path}")
+
+            # NEW: Save data with timestamps for synchronization
+            if params.get('save_timestamps', False):
+                # Save with absolute timestamps AND relative time
+                data = np.column_stack((
+                    self.sample_timestamps,  # Absolute Unix timestamp
+                    t,  # Relative time (s)
+                    R,  # Magnitude
+                    Theta,  # Phase
+                    self.all_X,  # In-phase
+                    self.all_Y  # Quadrature
+                ))
+                csv_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.csv')
+                np.savetxt(csv_path, data, delimiter=",",
+                           header="AbsoluteTimestamp,RelativeTime,R,Theta,X,Y",
+                           comments='', fmt='%.10f')
+                print(f"✓ Data saved with timestamps: {csv_path}")
+                print(f"  Columns: AbsoluteTimestamp (Unix), RelativeTime (s), R, Theta, X, Y")
+            else:
+                # Original format without timestamps
+                data = np.column_stack((t, R, Theta, self.all_X, self.all_Y))
+                csv_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.csv')
+                np.savetxt(csv_path, data, delimiter=",",
+                           header="Time,R,Theta,X,Y", comments='', fmt='%.6f')
+                print(f"✓ Data saved: {csv_path}")
         else:
             plt.show()
 
@@ -414,10 +493,11 @@ if __name__ == '__main__':
         'output_dir': OUTPUT_DIRECTORY,
         'save_file': SAVE_DATA,
         'fft': SHOW_FFT,
+        'save_timestamps': SAVE_TIMESTAMPS,  # NEW parameter
     }
 
     print("=" * 60)
-    print("RED PITAYA LOCK-IN AMPLIFIER")
+    print("RED PITAYA LOCK-IN AMPLIFIER - WITH TIMESTAMP SYNC")
     print("=" * 60)
     print("SETUP: Connect OUT1 directly to IN1")
     print("=" * 60)
@@ -425,6 +505,7 @@ if __name__ == '__main__':
     print(f"Filter Bandwidth: {FILTER_BANDWIDTH} Hz")
     print(f"Measurement Time: {MEASUREMENT_TIME} s")
     print(f"Averaging Window: {AVERAGING_WINDOW} samples")
+    print(f"Save Timestamps: {SAVE_TIMESTAMPS}")
     print("=" * 60)
     print("Expected for direct OUT1→IN1 connection:")
     print(f"  X = {REF_AMPLITUDE / 2:.3f} V (in-phase)")
@@ -432,6 +513,8 @@ if __name__ == '__main__':
     print(f"  R = {REF_AMPLITUDE / 2:.3f} V (magnitude)")
     print("  Theta = 0.000 rad (phase)")
     print("  FFT peak at 0 Hz")
+    print("=" * 60)
+    print("\nNOTE: Timestamps will be saved for synchronization with NI-DAQ data")
     print("=" * 60)
 
     rp.run(run_params)
