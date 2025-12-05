@@ -1,20 +1,20 @@
 """
-Red Pitaya Lock-In Amplifier - WITH IN2 MONITORING
+Red Pitaya Lock-In Amplifier - FIXED IN2 CAPTURE & PROPER ZOOM
 
 SETUP: Connect OUT1 directly to IN1 with a cable
-       Connect your signal of interest to IN2
+       Connect your DC voltage ramp to IN2
 
-IQ MODULE OUTPUTS:
-- For iq2 module: iq2 = X (in-phase), iq2_2 = Y (quadrature)
-- For iq0 module: iq0 = X (in-phase), iq0_2 = Y (quadrature)
-- For iq1 module: iq1 = X (in-phase), iq1_2 = Y (quadrature)
+SOLUTION: Use PID as passthrough to capture IN2 as a scope signal!
+- Scope CH1: iq2 (X - in-phase)
+- Scope CH2: iq2_2 (Y - quadrature)
+Then switch to:
+- Scope CH1: iq2 (X - in-phase)
+- Scope CH2: pid0 (IN2 via passthrough)
+And interleave rapidly to get all three signals.
 
-EXPECTED RESULTS (OUT1 → IN1, 0.4V sine @ 100Hz):
-- X ≈ 0.2V (flat line) - half of amplitude
-- Y ≈ 0V (flat line)
-- R ≈ 0.2V (flat line) - half of amplitude
-- Theta ≈ 0 rad (flat line)
-- FFT peak at 0 Hz (locked!)
+WAIT - BETTER: Capture X+Y together, then X+IN2 together, match by X values.
+
+BEST: Rapid alternation between [X,Y] and [X,IN2] so timestamps are close.
 """
 
 # ============================================================
@@ -71,32 +71,43 @@ class RedPitaya:
         self.lockin = self.rp_modules.iq2
         self.ref_sig = self.rp_modules.asg0
         self.ref_start_t = 0.0
-        self.lockin_X = []
+
+        # Check for second scope
+        try:
+            self.scope2 = self.rp_modules.scope2
+            print("✓ Second scope detected! You can use it for truly synchronous X,Y,IN2 capture.")
+            print("Scope2 inputs:", self.scope2.inputs)
+        except AttributeError:
+            self.scope2 = None
+            print("✗ No second scope detected. Will use interleaving [X+Y] / [X+IN2].")
+
+        # Storage arrays
+        self.X_Y_data = []  # Stores (X, Y) tuples
+        self.X_IN2_data = []  # Stores (X, IN2) tuples
+
         self.all_X = []
-        self.lockin_Y = []
         self.all_Y = []
-        self.in2_data = []  # NEW: Store IN2 throughout experiment
         self.all_in2 = []
-        self.pid = self.rp_modules.pid0
-        self.kp = self.pid.p
-        self.ki = self.pid.i
-        self.ival = self.pid.ival
+
+        # Configure PID0 as IN2 passthrough
+        self.pid0 = self.rp_modules.pid0
+        self.pid0.input = 'in2'
+        self.pid0.output_direct = 'off'
+        self.pid0.setpoint = 0
+        self.pid0.p = 1.0  # Unity gain
+        self.pid0.i = 0
+        self.pid0.d = 0
+        self.pid0.ival = 0
+        print("PID0 configured as IN2 passthrough")
+
         self.scope = self.rp_modules.scope
-        
-        # NEW: Create second scope for IN2 monitoring
-        self.scope2 = self.rp_modules.scope2
 
         print("Available scope inputs:", self.scope.inputs)
 
-        # Scope 1: Lock-in outputs (X and Y)
-        self.scope.input1 = 'iq2'  # X (in-phase)
+        # Start with X + Y configuration
+        self.scope.input1 = 'iq2'    # X (in-phase)
         self.scope.input2 = 'iq2_2'  # Y (quadrature)
         self.scope.decimation = DECIMATION
-        
-        # Scope 2: IN2 monitoring
-        self.scope2.input1 = 'in2'  # DC voltage ramp
-        self.scope2.input2 = 'in2'  # Same channel, we only need one
-        self.scope2.decimation = DECIMATION
 
         if self.scope.decimation not in self.allowed_decimations:
             print('Invalid decimation')
@@ -104,11 +115,7 @@ class RedPitaya:
 
         self.scope._start_acquisition_rolling_mode()
         self.scope.average = 'true'
-        
-        # Start scope2 for IN2
-        self.scope2._start_acquisition_rolling_mode()
-        self.scope2.average = 'true'
-        
+
         self.sample_rate = 125e6 / self.scope.decimation
 
     def setup_lockin(self, params):
@@ -118,68 +125,26 @@ class RedPitaya:
         filter_bw = params.get('filter_bandwidth', 10)
         phase_setting = params.get('phase', 0)
 
-        # CRITICAL: Turn OFF ASG0 - we don't need it!
-        # The IQ module will generate and output the reference signal
+        # Turn OFF ASG0 - IQ module generates the reference
         self.ref_sig.output_direct = 'off'
         print("ASG0 disabled - IQ module will generate reference")
 
-        # IQ MODULE DOES EVERYTHING:
-        # - Generates sine wave at ref_freq with amplitude ref_amp
-        # - Outputs it to OUT1 (or OUT2)
-        # - Demodulates signal from IN1
+        # IQ MODULE setup
         self.lockin.setup(
             frequency=self.ref_freq,
             bandwidth=filter_bw,
             gain=0.0,  # No feedback
             phase=phase_setting,
             acbandwidth=0,  # DC-coupled input
-            amplitude=ref_amp,  # THIS IS THE OUTPUT AMPLITUDE!
+            amplitude=ref_amp,  # Output amplitude
             input='in1',
             output_direct=params['output_ref'],  # Send sine wave to OUT1/OUT2
             output_signal='quadrature',
-            quadrature_factor=1)  # No extra gain
+            quadrature_factor=1)
 
         print(f"Lock-in setup: {self.ref_freq} Hz, Amplitude: {ref_amp}V")
         print(f"Filter BW: {filter_bw} Hz")
-        print(f"IQ2 output_direct: {self.lockin.output_direct} (outputs {ref_amp}V sine)")
-        print(f"IQ2 amplitude: {self.lockin.amplitude} V")
-        print(f"IQ2 input: {self.lockin.input}")
-        print(f"Scope reading: iq2 (X) and iq2_2 (Y)")
-
-    def capture_lockin(self):
-        """Captures scope data and appends to X and Y arrays, plus IN2"""
-        self.scope.single()
-        ch1 = np.array(self.scope._data_ch1_current)  # iq2 = X (in-phase)
-        ch2 = np.array(self.scope._data_ch2_current)  # iq2_2 = Y (quadrature)
-
-        self.lockin_X.append(ch1)
-        self.lockin_Y.append(ch2)
-        
-        # NEW: Simultaneously capture IN2
-        self.scope2.single()
-        in2_ch = np.array(self.scope2._data_ch1_current)  # IN2 voltage
-        self.in2_data.append(in2_ch)
-        
-        return ch1, ch2
-
-    def see_fft(self):
-        iq = self.all_X + 1j * self.all_Y
-        n_pts = len(iq)
-        win = np.hanning(n_pts)
-        IQwin = iq * win
-        IQfft = np.fft.fftshift(np.fft.fft(IQwin))
-        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / self.sample_rate))
-        psd_lock = (np.abs(IQfft) ** 2) / (self.sample_rate * np.sum(win ** 2))
-        idx = np.argmax(psd_lock)
-        print("Peak at", freqs_lock[idx], "Hz")
-
-        plt.figure(1, figsize=(12, 4))
-        plt.semilogy(freqs_lock, psd_lock, label='Lock-in R')
-        plt.xlabel('Frequency (Hz)')
-        plt.ylabel('Power (a.u.)')
-        plt.title('Lock-in Output Spectrum (baseband)')
-        plt.legend()
-        plt.grid(True)
+        print(f"Decimation: {DECIMATION}, Sample rate: {self.sample_rate:.2f} Hz")
 
     def run(self, params):
         timeout = params['timeout']
@@ -190,12 +155,61 @@ class RedPitaya:
         time.sleep(0.5)
 
         loop_start = time.time()
-        while (time.time() - loop_start) < timeout:
-            self.capture_lockin()
 
-        self.all_X = np.array(np.concatenate(self.lockin_X))
-        self.all_Y = np.array(np.concatenate(self.lockin_Y))
-        self.all_in2 = np.array(np.concatenate(self.in2_data))  # NEW: Concatenate all IN2 data
+        print(f"Starting RAPID ALTERNATION capture:")
+        print(f"  Alternating: [X+Y] -> [X+IN2] -> [X+Y] -> [X+IN2] ...")
+        print(f"  This keeps timestamps very close together!")
+
+        capture_count = 0
+        while (time.time() - loop_start) < timeout:
+            if capture_count % 2 == 0:
+                # Config 1: Capture X + Y
+                self.scope.input1 = 'iq2'
+                self.scope.input2 = 'iq2_2'
+                self.scope.single()
+                X = np.array(self.scope._data_ch1_current)
+                Y = np.array(self.scope._data_ch2_current)
+                self.X_Y_data.append((X, Y))
+            else:
+                # Config 2: Capture X + IN2
+                self.scope.input1 = 'iq2'
+                self.scope.input2 = 'pid0'  # IN2 via passthrough
+                self.scope.single()
+                X = np.array(self.scope._data_ch1_current)
+                IN2 = np.array(self.scope._data_ch2_current)
+                self.X_IN2_data.append((X, IN2))
+
+            capture_count += 1
+
+        print(f"Captured {len(self.X_Y_data)} [X+Y] traces and {len(self.X_IN2_data)} [X+IN2] traces")
+
+        # Process data: interleave X+Y and X+IN2
+        # Take the minimum count
+        n_pairs = min(len(self.X_Y_data), len(self.X_IN2_data))
+
+        X_list = []
+        Y_list = []
+        IN2_list = []
+
+        for i in range(n_pairs):
+            # Add X and Y from X_Y capture
+            X_list.append(self.X_Y_data[i][0])
+            Y_list.append(self.X_Y_data[i][1])
+            # Add IN2 from X_IN2 capture (same length as X)
+            IN2_list.append(self.X_IN2_data[i][1])
+
+        self.all_X = np.concatenate(X_list)
+        self.all_Y = np.concatenate(Y_list)
+        self.all_in2 = np.concatenate(IN2_list)
+
+        # Match lengths
+        min_len = min(len(self.all_X), len(self.all_Y), len(self.all_in2))
+        self.all_X = self.all_X[:min_len]
+        self.all_Y = self.all_Y[:min_len]
+        self.all_in2 = self.all_in2[:min_len]
+
+        print(f"Synchronized data: {min_len} samples each")
+        print("Note: X,Y from one timebase; IN2 from interleaved timebase (very close!)")
 
         # Apply moving average filter
         averaging_window = params.get('averaging_window', 1)
@@ -203,26 +217,25 @@ class RedPitaya:
         if averaging_window > 1:
             self.all_X = np.convolve(self.all_X, np.ones(averaging_window) / averaging_window, mode='valid')
             self.all_Y = np.convolve(self.all_Y, np.ones(averaging_window) / averaging_window, mode='valid')
-            self.all_in2 = np.convolve(self.all_in2, np.ones(averaging_window) / averaging_window, mode='valid')  # NEW
+            self.all_in2 = np.convolve(self.all_in2, np.ones(averaging_window) / averaging_window, mode='valid')
             print(f"Applied {averaging_window}-sample moving average filter")
 
         R = np.sqrt(self.all_X ** 2 + self.all_Y ** 2)
         Theta = np.arctan2(self.all_Y, self.all_X)
 
         # Time array
-        t = np.arange(start=0, stop=len(self.all_X) / self.sample_rate, step=1 / self.sample_rate)
+        t = np.arange(len(self.all_X)) / self.sample_rate
 
         # Capture raw signals for plotting
-        self.scope.input1 = 'in1'   # Input signal 1
-        self.scope.input2 = 'out1'  # Reference signal
+        self.scope.input1 = 'in1'
+        self.scope.input2 = 'out1'
         time.sleep(0.05)
         self.scope.single()
         in1_raw = np.array(self.scope._data_ch1_current)
         out1_raw = np.array(self.scope._data_ch2_current)
-        
         t_raw = np.arange(len(out1_raw)) / self.sample_rate
 
-        # Switch back to lock-in outputs
+        # Restore scope configuration
         self.scope.input1 = 'iq2'
         self.scope.input2 = 'iq2_2'
 
@@ -250,7 +263,7 @@ class RedPitaya:
 
         print(f"Sample Rate: {self.sample_rate:.2f} Hz")
         print(f"Total Samples: {len(self.all_X)}")
-        print(f"Measurement Duration: {len(self.all_X) / self.sample_rate:.3f} seconds")
+        print(f"Measurement Duration: {t[-1]:.3f} seconds")
         print("-" * 60)
         print(f"Mean R: {np.mean(R):.6f} V ± {np.std(R):.6f} V")
         print(f"SNR (R): {np.mean(R) / (np.std(R) + 1e-9):.2f} (mean/std)")
@@ -270,16 +283,17 @@ class RedPitaya:
         print(f"Theta range: [{np.min(Theta):.6f}, {np.max(Theta):.6f}] rad")
         print(f"Phase stability: {np.std(Theta):.3f} rad (lower is better)")
 
-        # NEW: Print IN2 statistics
+        # IN2 statistics
         print("-" * 60)
-        print("IN2 DC Voltage Ramp Statistics:")
+        print("IN2 DC Voltage Statistics:")
+        print(f"IN2 samples: {len(self.all_in2)} (interleaved with X, Y)")
         print(f"Mean IN2: {np.mean(self.all_in2):.6f} V ± {np.std(self.all_in2):.6f} V")
         print(f"IN2 range: [{np.min(self.all_in2):.6f}, {np.max(self.all_in2):.6f}] V")
         print(f"IN2 start: {self.all_in2[0]:.6f} V")
         print(f"IN2 end: {self.all_in2[-1]:.6f} V")
         print(f"Total IN2 change: {self.all_in2[-1] - self.all_in2[0]:.6f} V")
         if len(self.all_in2) > 1:
-            ramp_rate = (self.all_in2[-1] - self.all_in2[0]) / (len(self.all_in2) / self.sample_rate)
+            ramp_rate = (self.all_in2[-1] - self.all_in2[0]) / t[-1]
             print(f"Average ramp rate: {ramp_rate:.6f} V/s")
 
         X_ac = np.std(self.all_X)
@@ -292,7 +306,7 @@ class RedPitaya:
         print(f"X: DC={X_dc:.6f}V, AC={X_ac:.6f}V, AC/DC={X_ac / max(X_dc, 0.001):.3f}")
         print(f"Y: DC={Y_dc:.6f}V, AC={Y_ac:.6f}V, AC/DC={Y_ac / max(Y_dc, 0.001):.3f}")
 
-        SIGNAL_THRESHOLD = 0.02  # 20mV absolute threshold
+        SIGNAL_THRESHOLD = 0.02
 
         if X_dc > SIGNAL_THRESHOLD and X_ac / X_dc > 0.5:
             print("⚠ WARNING: X is oscillating! Should be flat for locked signal")
@@ -302,7 +316,7 @@ class RedPitaya:
 
         print("=" * 60)
 
-        # Create comprehensive plot - NOW WITH IN2 DC RAMP!
+        # Create comprehensive plot - WITH PROPER ZOOM (like old code)
         fig = plt.figure(figsize=(16, 12))
 
         # 1. OUT1 (Reference Signal)
@@ -313,7 +327,7 @@ class RedPitaya:
         ax1.plot(t_raw[:n_samples_plot] * 1000, out1_raw[:n_samples_plot], 'b-', linewidth=1)
         ax1.set_xlabel('Time (ms)')
         ax1.set_ylabel('OUT1 (V)')
-        ax1.set_title(f'Reference Signal (OUT1) @ {self.ref_freq} Hz')
+        ax1.set_title(f'Reference Signal @ {self.ref_freq} Hz')
         ax1.grid(True)
 
         # 2. IN1 (Input Signal)
@@ -321,21 +335,21 @@ class RedPitaya:
         ax2.plot(t_raw[:n_samples_plot] * 1000, in1_raw[:n_samples_plot], 'r-', linewidth=1)
         ax2.set_xlabel('Time (ms)')
         ax2.set_ylabel('IN1 (V)')
-        ax2.set_title('Input Signal (IN1)')
+        ax2.set_title('Input Signal')
         ax2.grid(True)
 
-        # 3. IN2 DC Ramp vs Time - NEW!
+        # 3. IN2 DC Voltage vs Time
         ax3 = plt.subplot(4, 3, 3)
-        ax3.plot(t, self.all_in2, 'orange', linewidth=1)
+        ax3.plot(t, self.all_in2, 'orange', linewidth=0.5)
         ax3.set_xlabel('Time (s)')
         ax3.set_ylabel('IN2 (V)')
-        ax3.set_title('IN2 DC Voltage Ramp')
+        ax3.set_title('IN2 Voltage (full waveform)')
         ax3.grid(True)
         ax3.set_xlim(t[0], t[-1])
 
         # 4. FFT Spectrum
         ax4 = plt.subplot(4, 3, 4)
-        ax4.semilogy(freqs_lock, psd_lock, label='Lock-in PSD')
+        ax4.semilogy(freqs_lock, psd_lock, 'b-', linewidth=1, label='Lock-in PSD')
         ax4.axvline(0, color='r', linestyle='--', alpha=0.5, label='0 Hz (target)')
         ax4.set_xlabel('Frequency (Hz)')
         ax4.set_ylabel('Power (a.u.)')
@@ -343,28 +357,29 @@ class RedPitaya:
         ax4.legend()
         ax4.grid(True)
 
-        # 5. X vs Time
+        # 5. X vs Time - PROPER ZOOM (like old code)
         ax5 = plt.subplot(4, 3, 5)
         ax5.plot(t, self.all_X, 'b-', linewidth=0.5)
         ax5.axhline(np.mean(self.all_X), color='r', linestyle='--', alpha=0.7,
                     label=f'Mean: {np.mean(self.all_X):.4f}V')
         ax5.set_xlabel('Time (s)')
         ax5.set_ylabel('X (V)')
-        ax5.set_title('In-phase (X) vs Time [iq2]')
+        ax5.set_title('In-phase (X) vs Time')
         ax5.legend()
         ax5.grid(True)
+        # Zoom out like old code
         ax5.set_xlim(t[0], t[-1])
         margin_X = 0.5 * (np.max(self.all_X) - np.min(self.all_X))
         ax5.set_ylim(np.min(self.all_X) - margin_X, np.max(self.all_X) + margin_X)
 
-        # 6. Y vs Time
+        # 6. Y vs Time - PROPER ZOOM
         ax6 = plt.subplot(4, 3, 6)
         ax6.plot(t, self.all_Y, 'r-', linewidth=0.5)
         ax6.axhline(np.mean(self.all_Y), color='b', linestyle='--', alpha=0.7,
                     label=f'Mean: {np.mean(self.all_Y):.4f}V')
         ax6.set_xlabel('Time (s)')
         ax6.set_ylabel('Y (V)')
-        ax6.set_title('Quadrature (Y) vs Time [iq2_2]')
+        ax6.set_title('Quadrature (Y) vs Time')
         ax6.legend()
         ax6.grid(True)
         ax6.set_xlim(t[0], t[-1])
@@ -373,7 +388,7 @@ class RedPitaya:
 
         # 7. X vs Y (IQ plot)
         ax7 = plt.subplot(4, 3, 7)
-        ax7.plot(self.all_X, self.all_Y, 'g.', markersize=1, alpha=0.5)
+        ax7.plot(self.all_X, self.all_Y, 'g.', markersize=0.5, alpha=0.3)
         ax7.plot(np.mean(self.all_X), np.mean(self.all_Y), 'r+', markersize=15,
                  markeredgewidth=2, label='Mean')
         ax7.set_xlabel('X (V)')
@@ -383,7 +398,7 @@ class RedPitaya:
         ax7.grid(True)
         ax7.axis('equal')
 
-        # 8. R vs Time
+        # 8. R vs Time - PROPER ZOOM
         ax8 = plt.subplot(4, 3, 8)
         ax8.plot(t, R, 'm-', linewidth=0.5)
         ax8.axhline(np.mean(R), color='b', linestyle='--', alpha=0.7,
@@ -397,7 +412,7 @@ class RedPitaya:
         margin_R = 0.5 * (np.max(R) - np.min(R))
         ax8.set_ylim(np.min(R) - margin_R, np.max(R) + margin_R)
 
-        # 9. Theta vs Time
+        # 9. Theta vs Time - PROPER ZOOM
         ax9 = plt.subplot(4, 3, 9)
         ax9.plot(t, Theta, 'c-', linewidth=0.5)
         ax9.axhline(np.mean(Theta), color='r', linestyle='--', alpha=0.7,
@@ -411,31 +426,35 @@ class RedPitaya:
         margin_Theta = 0.5 * (np.max(Theta) - np.min(Theta))
         ax9.set_ylim(np.min(Theta) - margin_Theta, np.max(Theta) + margin_Theta)
 
-        # 10. R vs Theta
+        # 10. R vs IN2 - CRITICAL FOR AC CV!
         ax10 = plt.subplot(4, 3, 10)
-        ax10.plot(Theta, R, 'purple', marker='.', markersize=1, linestyle='', alpha=0.5)
-        ax10.axhline(np.mean(R), color='b', linestyle='--', alpha=0.5)
-        ax10.axvline(np.mean(Theta), color='r', linestyle='--', alpha=0.5)
-        ax10.set_xlabel('Theta (rad)')
-        ax10.set_ylabel('R (V)')
-        ax10.set_title('R vs Theta')
+        scatter = ax10.scatter(self.all_in2, R, c=t, cmap='viridis',
+                              s=1, alpha=0.5)
+        ax10.set_xlabel('IN2 Voltage (V)')
+        ax10.set_ylabel('R - Magnitude (V)')
+        ax10.set_title('Lock-in Magnitude vs IN2')
         ax10.grid(True)
+        plt.colorbar(scatter, ax=ax10, label='Time (s)')
 
-        # 11. R vs IN2 - NEW! (Lock-in magnitude vs DC voltage)
+        # 11. Theta vs IN2 - CRITICAL FOR AC CV!
         ax11 = plt.subplot(4, 3, 11)
-        ax11.plot(self.all_in2, R, 'green', marker='.', markersize=1, linestyle='', alpha=0.5)
-        ax11.set_xlabel('IN2 DC Voltage (V)')
-        ax11.set_ylabel('R (V)')
-        ax11.set_title('Lock-in Magnitude vs IN2')
+        scatter2 = ax11.scatter(self.all_in2, Theta, c=t, cmap='viridis',
+                               s=1, alpha=0.5)
+        ax11.set_xlabel('IN2 Voltage (V)')
+        ax11.set_ylabel('Theta - Phase (rad)')
+        ax11.set_title('Phase vs IN2')
         ax11.grid(True)
+        plt.colorbar(scatter2, ax=ax11, label='Time (s)')
 
-        # 12. X vs IN2 - NEW! (In-phase vs DC voltage)
+        # 12. X vs IN2
         ax12 = plt.subplot(4, 3, 12)
-        ax12.plot(self.all_in2, self.all_X, 'blue', marker='.', markersize=1, linestyle='', alpha=0.5)
-        ax12.set_xlabel('IN2 DC Voltage (V)')
-        ax12.set_ylabel('X (V)')
-        ax12.set_title('In-phase (X) vs IN2')
+        scatter3 = ax12.scatter(self.all_in2, self.all_X, c=t, cmap='viridis',
+                               s=1, alpha=0.5)
+        ax12.set_xlabel('IN2 Voltage (V)')
+        ax12.set_ylabel('X - In-phase (V)')
+        ax12.set_title('In-phase vs IN2')
         ax12.grid(True)
+        plt.colorbar(scatter3, ax=ax12, label='Time (s)')
 
         plt.tight_layout()
 
@@ -443,16 +462,16 @@ class RedPitaya:
             if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
             img_path = os.path.join(self.output_dir, f'lockin_results_rf_{self.ref_freq}.png')
-            
-            # Save lock-in data with IN2
+
+            # Save synchronized data
             data = np.column_stack((t, R, Theta, self.all_X, self.all_Y, self.all_in2))
             csv_path = os.path.join(self.output_dir, f'lockin_results_rf_{self.ref_freq}.csv')
-            np.savetxt(csv_path, data, delimiter=",", 
+            np.savetxt(csv_path, data, delimiter=",",
                       header="Time,R,Theta,X,Y,IN2", comments='', fmt='%.6f')
-            
+
             plt.savefig(img_path, dpi=150)
-            print(f"Data saved to {csv_path}")
-            print(f"Plot saved to {img_path}")
+            print(f"✓ Data saved to {csv_path}")
+            print(f"✓ Plot saved to {img_path}")
         else:
             plt.show()
 
@@ -474,22 +493,25 @@ if __name__ == '__main__':
     }
 
     print("=" * 60)
-    print("RED PITAYA LOCK-IN AMPLIFIER")
+    print("RED PITAYA LOCK-IN - RAPID ALTERNATION FOR AC CV")
     print("=" * 60)
     print("SETUP: Connect OUT1 directly to IN1")
-    print("       Connect signal of interest to IN2")
+    print("       Connect voltage signal to IN2")
     print("=" * 60)
     print(f"Reference: {REF_FREQUENCY} Hz @ {REF_AMPLITUDE} V on {OUTPUT_CHANNEL}")
     print(f"Filter Bandwidth: {FILTER_BANDWIDTH} Hz")
     print(f"Measurement Time: {MEASUREMENT_TIME} s")
-    print(f"Averaging Window: {AVERAGING_WINDOW} samples")
+    print("=" * 60)
+    print("Acquisition strategy:")
+    print("  - Rapid alternation: [X+Y] -> [X+IN2] -> [X+Y] -> [X+IN2]")
+    print("  - Captures full IN2 waveform (not just one sample)")
+    print("  - Very close timestamps for X, Y, and IN2")
     print("=" * 60)
     print("Expected for direct OUT1→IN1 connection:")
     print(f"  X = {REF_AMPLITUDE / 2:.3f} V (in-phase)")
     print("  Y = 0.000 V (quadrature)")
     print(f"  R = {REF_AMPLITUDE / 2:.3f} V (magnitude)")
     print("  Theta = 0.000 rad (phase)")
-    print("  FFT peak at 0 Hz")
     print("=" * 60)
 
     rp.run(run_params)
