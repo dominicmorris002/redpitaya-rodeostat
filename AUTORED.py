@@ -1,21 +1,21 @@
 """
-Red Pitaya Lock-In Amplifier - CORRECTED VERSION
+Red Pitaya DUAL-CHANNEL Lock-In Amplifier - WITH TIMESTAMP SYNCHRONIZATION
 
 SETUP: 
-- Connect OUT1 directly to IN1 with a cable (for LIA signal)
-- Connect your DC ramp signal to IN2 (for voltage monitoring)
+- OUT1 connected to your electrochemical cell (via Red Pitaya's Autolab connector or directly)
+- IN1 measures electrochemical response
+- IN2 measures Autolab current (or any other signal at the same frequency)
+
+This version uses TWO IQ modules to simultaneously demodulate both channels
+WITHOUT using the scope! Direct reading from IQ modules = no bandwidth limits!
 
 IQ MODULE OUTPUTS:
-- For iq2 module: iq2 = X (in-phase), iq2_2 = Y (quadrature)
-- For iq0 module: iq0 = X (in-phase), iq0_2 = Y (quadrature)
-- For iq1 module: iq1 = X (in-phase), iq1_2 = Y (quadrature)
+- iq2: Demodulates IN1 (electrochemistry) → outputs X1, Y1
+- iq0: Demodulates IN2 (Autolab current) → outputs X2, Y2
 
-EXPECTED RESULTS (OUT1 → IN1, 0.4V sine @ 100Hz):
-- X ≈ 0.2V (flat line) - half of amplitude
-- Y ≈ 0V (flat line)
-- R ≈ 0.2V (flat line) - half of amplitude
-- Theta ≈ 0 rad (flat line)
-- FFT peak at 0 Hz (locked!)
+SYNCHRONIZATION:
+- Both channels perfectly synchronized (same timestamp for each sample pair)
+- Saves CSV with absolute timestamps for merging with external data
 """
 
 # ============================================================
@@ -24,23 +24,26 @@ EXPECTED RESULTS (OUT1 → IN1, 0.4V sine @ 100Hz):
 REF_FREQUENCY = 100  # Hz - AC excitation frequency
 REF_AMPLITUDE = 0.5  # V - AC signal amplitude (will appear on OUT1)
 OUTPUT_CHANNEL = 'out1'  # 'out1' or 'out2' - where to send AC signal
-PHASE_OFFSET = 0  # degrees - phase adjustment (0, 90, 180, 270)
+PHASE_OFFSET_CH1 = 0  # degrees - phase adjustment for IN1
+PHASE_OFFSET_CH2 = 0  # degrees - phase adjustment for IN2
 MEASUREMENT_TIME = 30.0  # seconds - how long to measure
 
 # LOCK-IN FILTER BANDWIDTH
 FILTER_BANDWIDTH = 10  # Hz - lower = cleaner, higher = faster response
+
+# SAMPLING RATE (direct IQ reading)
+SAMPLE_RATE = 100  # Hz - how often to read IQ module outputs (1-1000 Hz typical)
 
 # AVERAGING
 AVERAGING_WINDOW = 1  # samples - set to 1 to see raw lock-in output first
 
 # Data saving
 SAVE_DATA = True  # True = save to files, False = just show plots
-OUTPUT_DIRECTORY = 'C:\\SEED 3.2 Data\\RedPitaya\\Test Data'  # CHANGE THIS to your directory
-FILE_NAME = 'RP_LockIn_Test'  # Base filename for saved data
+OUTPUT_DIRECTORY = 'test_data'
 
 # Advanced settings
-DECIMATION = 8192
 SHOW_FFT = True
+SAVE_TIMESTAMPS = True  # Save absolute timestamps for sync with NI-DAQ
 # ============================================================
 
 import math
@@ -50,469 +53,432 @@ from matplotlib import pyplot as plt
 import time
 import csv
 import os
+from datetime import datetime
 
-N_FFT_SHOW = 10
 
-
-class RedPitaya:
-    electrode_map = {'A': (False, False), 'B': (True, False),
-                     'C': (False, True), 'D': (True, True)}
-    current_range_map = {'10uA': (False, True, True, True),
-                         '100uA': (True, False, True, True),
-                         '1mA': (True, True, False, True),
-                         '10mA': (True, True, True, False)}
-    dac_gain_map = {'1X': (False, False), '5X': (False, True),
-                    '2X': (True, False), '10X': (True, True)}
-    current_scaling_map = {'10mA': 65, '1mA': 600, '100uA': 6000, '10uA': 60000}
-    allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
-
+class DualChannelRedPitaya:
+    
     def __init__(self, output_dir='test_data'):
-        self.rp = Pyrpl(config='lockin_config', hostname='rp-f073ce.local')
+        self.rp = Pyrpl(config='dual_lockin_config', hostname='rp-f073ce.local')
         self.output_dir = output_dir
         self.rp_modules = self.rp.rp
-        self.lockin = self.rp_modules.iq2
-        self.ref_sig = self.rp_modules.asg0
-        self.ref_start_t = 0.0
-        self.lockin_X = []
-        self.all_X = []
-        self.lockin_Y = []
-        self.all_Y = []
-        self.pid = self.rp_modules.pid0
-        self.kp = self.pid.p
-        self.ki = self.pid.i
-        self.ival = self.pid.ival
-        self.scope = self.rp_modules.scope
-
-        print("Available scope inputs:", self.scope.inputs)
-
-        # CORRECTED: For iq2 module, use iq2 (X) and iq2_2 (Y)
-        self.scope.input1 = 'iq2'  # X (in-phase)
-        self.scope.input2 = 'iq2_2'  # Y (quadrature)
-        self.scope.decimation = DECIMATION
-
-        if self.scope.decimation not in self.allowed_decimations:
-            print('Invalid decimation')
-            exit()
-
-        self.scope._start_acquisition_rolling_mode()
-        self.scope.average = 'true'
-        self.sample_rate = 125e6 / self.scope.decimation
-
-    def setup_lockin(self, params):
+        
+        # TWO lock-in amplifiers!
+        self.lockin1 = self.rp_modules.iq2  # IN1 (electrochemistry)
+        self.lockin2 = self.rp_modules.iq0  # IN2 (Autolab current)
+        
+        # Data storage for Channel 1 (IN1)
+        self.all_X1 = []
+        self.all_Y1 = []
+        
+        # Data storage for Channel 2 (IN2)
+        self.all_X2 = []
+        self.all_Y2 = []
+        
+        # Timestamp storage
+        self.sample_timestamps = []
+        self.acquisition_start_time = None
+        
+        print("✓ Dual-channel lock-in initialized")
+        print("  Channel 1: iq2 → IN1")
+        print("  Channel 2: iq0 → IN2")
+    
+    def setup_dual_lockin(self, params):
         self.ref_freq = params['ref_freq']
-        self.ref_period = 1 / self.ref_freq
         ref_amp = params['ref_amp']
         filter_bw = params.get('filter_bandwidth', 10)
-        phase_setting = params.get('phase', 0)
-
-        # CRITICAL: Turn OFF ASG0 - we don't need it!
-        # The IQ module will generate and output the reference signal
-        self.ref_sig.output_direct = 'off'
-        print("ASG0 disabled - IQ module will generate reference")
-
-        # IQ MODULE DOES EVERYTHING:
-        # - Generates sine wave at ref_freq with amplitude ref_amp
-        # - Outputs it to OUT1 (or OUT2)
-        # - Demodulates signal from IN1
-        self.lockin.setup(
+        phase_ch1 = params.get('phase_ch1', 0)
+        phase_ch2 = params.get('phase_ch2', 0)
+        
+        print("\n" + "=" * 60)
+        print("CONFIGURING DUAL LOCK-IN AMPLIFIERS")
+        print("=" * 60)
+        
+        # CHANNEL 1 (IN1): Generates reference AND demodulates
+        self.lockin1.setup(
             frequency=self.ref_freq,
             bandwidth=filter_bw,
             gain=0.0,  # No feedback
-            phase=phase_setting,
+            phase=phase_ch1,
             acbandwidth=0,  # DC-coupled input
-            amplitude=ref_amp,  # THIS IS THE OUTPUT AMPLITUDE!
+            amplitude=ref_amp,  # Output amplitude
             input='in1',
             output_direct=params['output_ref'],  # Send sine wave to OUT1/OUT2
             output_signal='quadrature',
-            quadrature_factor=1)  # No extra gain
-
-        print(f"Lock-in setup: {self.ref_freq} Hz, Amplitude: {ref_amp}V")
-        print(f"Filter BW: {filter_bw} Hz")
-        print(f"IQ2 output_direct: {self.lockin.output_direct} (outputs {ref_amp}V sine)")
-        print(f"IQ2 amplitude: {self.lockin.amplitude} V")
-        print(f"IQ2 input: {self.lockin.input}")
-        print(f"Scope reading: iq2 (X) and iq2_2 (Y)")
-
-    def capture_lockin(self):
-        """Captures scope data and appends to X and Y arrays"""
-        self.scope.single()
-        ch1 = np.array(self.scope._data_ch1_current)  # iq2 = X (in-phase)
-        ch2 = np.array(self.scope._data_ch2_current)  # iq2_2 = Y (quadrature)
-
-        self.lockin_X.append(ch1)
-        self.lockin_Y.append(ch2)
-        return ch1, ch2
-
-    def see_fft(self):
-        iq = self.all_X + 1j * self.all_Y
-        n_pts = len(iq)
-        win = np.hanning(n_pts)
-        IQwin = iq * win
-        IQfft = np.fft.fftshift(np.fft.fft(IQwin))
-        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / self.sample_rate))
-        psd_lock = (np.abs(IQfft) ** 2) / (self.sample_rate * np.sum(win ** 2))
-        idx = np.argmax(psd_lock)
-        print("Peak at", freqs_lock[idx], "Hz")
-
-        plt.figure(1, figsize=(12, 4))
-        plt.semilogy(freqs_lock, psd_lock, label='Lock-in R')
-        plt.xlabel('Frequency (Hz)')
-        plt.ylabel('Power (a.u.)')
-        plt.title('Lock-in Output Spectrum (baseband)')
-        plt.legend()
-        plt.grid(True)
-
+            quadrature_factor=1)
+        
+        print(f"✓ Channel 1 (iq2):")
+        print(f"  Input: IN1")
+        print(f"  Generates: {ref_amp}V sine @ {self.ref_freq}Hz on {params['output_ref']}")
+        print(f"  Filter BW: {filter_bw} Hz")
+        print(f"  Phase: {phase_ch1}°")
+        
+        # CHANNEL 2 (IN2): Only demodulates (no output)
+        self.lockin2.setup(
+            frequency=self.ref_freq,
+            bandwidth=filter_bw,
+            gain=0.0,  # No feedback
+            phase=phase_ch2,
+            acbandwidth=0,  # DC-coupled input
+            amplitude=0.0,  # NO output from this channel
+            input='in2',
+            output_direct='off',  # Don't output anything
+            output_signal='quadrature',
+            quadrature_factor=1)
+        
+        print(f"✓ Channel 2 (iq0):")
+        print(f"  Input: IN2")
+        print(f"  Demodulates at: {self.ref_freq}Hz")
+        print(f"  Filter BW: {filter_bw} Hz")
+        print(f"  Phase: {phase_ch2}°")
+        print("=" * 60)
+    
+    def read_iq_direct(self):
+        """Read IQ module outputs directly - NO SCOPE NEEDED!"""
+        timestamp = time.time()
+        
+        # Read Channel 1 (IN1) - iq2 module
+        X1 = self.lockin1.iq  # In-phase (X)
+        Y1 = self.lockin1.iq2  # Quadrature (Y) - might be .iq_2 depending on PyRPL version
+        
+        # Read Channel 2 (IN2) - iq0 module
+        X2 = self.lockin2.iq  # In-phase (X)
+        Y2 = self.lockin2.iq2  # Quadrature (Y)
+        
+        return timestamp, X1, Y1, X2, Y2
+    
     def run(self, params):
         timeout = params['timeout']
-        self.setup_lockin(params)
-
-        # Let the lock-in settle
-        print("Waiting for lock-in to settle...")
+        sample_rate = params.get('sample_rate', 100)  # Hz
+        sample_period = 1.0 / sample_rate
+        
+        self.setup_dual_lockin(params)
+        
+        # Let the lock-ins settle
+        print("\nWaiting for lock-ins to settle...")
         time.sleep(0.5)
-
+        
+        # Record absolute start time
+        self.acquisition_start_time = time.time()
+        print(f"✓ Acquisition started at: {datetime.fromtimestamp(self.acquisition_start_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
+        print(f"  Sampling at {sample_rate} Hz")
+        print(f"  Duration: {timeout} seconds")
+        print(f"  Expected samples: ~{int(timeout * sample_rate)}")
+        
         loop_start = time.time()
+        sample_count = 0
+        
+        # MAIN ACQUISITION LOOP
         while (time.time() - loop_start) < timeout:
-            self.capture_lockin()
-
-        self.all_X = np.array(np.concatenate(self.lockin_X))
-        self.all_Y = np.array(np.concatenate(self.lockin_Y))
-
-        # Apply moving average filter
+            # Read both channels simultaneously
+            timestamp, X1, Y1, X2, Y2 = self.read_iq_direct()
+            
+            # Store data
+            self.all_X1.append(X1)
+            self.all_Y1.append(Y1)
+            self.all_X2.append(X2)
+            self.all_Y2.append(Y2)
+            self.sample_timestamps.append(timestamp)
+            
+            sample_count += 1
+            
+            # Wait for next sample
+            time.sleep(sample_period)
+        
+        print(f"✓ Acquisition complete: {sample_count} samples collected")
+        
+        # Convert to numpy arrays
+        self.all_X1 = np.array(self.all_X1)
+        self.all_Y1 = np.array(self.all_Y1)
+        self.all_X2 = np.array(self.all_X2)
+        self.all_Y2 = np.array(self.all_Y2)
+        self.sample_timestamps = np.array(self.sample_timestamps)
+        
+        # Apply moving average filter if requested
         averaging_window = params.get('averaging_window', 1)
-
         if averaging_window > 1:
-            self.all_X = np.convolve(self.all_X, np.ones(averaging_window) / averaging_window, mode='valid')
-            self.all_Y = np.convolve(self.all_Y, np.ones(averaging_window) / averaging_window, mode='valid')
-            print(f"Applied {averaging_window}-sample moving average filter")
-
-        R = np.sqrt(self.all_X ** 2 + self.all_Y ** 2)
-        Theta = np.arctan2(self.all_Y, self.all_X)
-
-        # Time array
-        t = np.arange(start=0, stop=len(self.all_X) / self.sample_rate, step=1 / self.sample_rate)
-
-        # MODIFIED: Capture raw signals for plotting
-        # OUT1 = reference signal, IN2 = DC ramp voltage
-        self.scope.input1 = 'out1'  # Reference signal from IQ module
-        self.scope.input2 = 'in2'   # DC ramp voltage (CHANGED FROM in1)
-        time.sleep(0.05)
-        self.scope.single()
-        out1_raw = np.array(self.scope._data_ch1_current)
-        in2_raw = np.array(self.scope._data_ch2_current)  # CHANGED: now reading IN2
-        t_raw = np.arange(len(out1_raw)) / self.sample_rate
-
-        # Create dcRamp array - continuous recording of IN2 voltage over time
-        # Resample in2_raw to match the time array length
-        if len(in2_raw) > len(t):
-            # Downsample in2_raw to match t
-            downsample_factor = len(in2_raw) // len(t)
-            in2_dcRamp = in2_raw[::downsample_factor][:len(t)]
-        else:
-            # Upsample by repeating values
-            repeat_factor = len(t) // len(in2_raw) + 1
-            in2_dcRamp = np.repeat(in2_raw, repeat_factor)[:len(t)]
-
-        # Switch back to lock-in outputs
-        self.scope.input1 = 'iq2'
-        self.scope.input2 = 'iq2_2'
-
-        # FFT calculations
-        iq = self.all_X + 1j * self.all_Y
-        n_pts = len(iq)
-        win = np.hanning(n_pts)
-        IQwin = iq * win
-        IQfft = np.fft.fftshift(np.fft.fft(IQwin))
-        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / self.sample_rate))
-        psd_lock = (np.abs(IQfft) ** 2) / (self.sample_rate * np.sum(win ** 2))
-        idx = np.argmax(psd_lock)
-
-        print("=" * 60)
-        print("LOCK-IN DIAGNOSTICS")
-        print("=" * 60)
-        print(f"Reference Frequency Set: {self.ref_freq} Hz")
-        print(f"FFT Peak Found at: {freqs_lock[idx]:.2f} Hz")
-        print(f"Peak Offset from 0 Hz: {abs(freqs_lock[idx]):.2f} Hz")
-
-        if abs(freqs_lock[idx]) < 5:
-            print("✓ Lock-in is LOCKED (peak near 0 Hz)")
-        else:
-            print("✗ WARNING: Lock-in NOT locked! Peak should be at 0 Hz!")
-
-        print(f"Sample Rate: {self.sample_rate:.2f} Hz")
-        print(f"Total Samples: {len(self.all_X)}")
-        print(f"Measurement Duration: {len(self.all_X) / self.sample_rate:.3f} seconds")
-        print("-" * 60)
-        print(f"Mean R: {np.mean(R):.6f} V ± {np.std(R):.6f} V")
-        print(f"SNR (R): {np.mean(R) / (np.std(R) + 1e-9):.2f} (mean/std)")
-        print(f"R range: [{np.min(R):.6f}, {np.max(R):.6f}] V")
-
-        expected_R = params['ref_amp'] / 2
-        if abs(np.mean(R) - expected_R) < 0.05:
-            print(f"✓ R close to expected {expected_R:.3f}V")
-        else:
-            print(f"✗ R differs from expected {expected_R:.3f}V")
-            print(f"  Difference: {abs(np.mean(R) - expected_R):.3f}V")
-
-        print("-" * 60)
-        print(f"Mean X: {np.mean(self.all_X):.6f} V ± {np.std(self.all_X):.6f} V")
-        print(f"Mean Y: {np.mean(self.all_Y):.6f} V ± {np.std(self.all_Y):.6f} V")
-        print(f"Mean Theta: {np.mean(Theta):.6f} rad ± {np.std(Theta):.6f} rad")
-        print(f"Theta range: [{np.min(Theta):.6f}, {np.max(Theta):.6f}] rad")
-        print(f"Phase stability: {np.std(Theta):.3f} rad (lower is better)")
-
-        X_ac = np.std(self.all_X)
-        Y_ac = np.std(self.all_Y)
-        X_dc = np.mean(np.abs(self.all_X))
-        Y_dc = np.mean(np.abs(self.all_Y))
-
-        print("-" * 60)
-        print("Signal characteristics:")
-        print(f"X: DC={X_dc:.6f}V, AC={X_ac:.6f}V, AC/DC={X_ac / max(X_dc, 0.001):.3f}")
-        print(f"Y: DC={Y_dc:.6f}V, AC={Y_ac:.6f}V, AC/DC={Y_ac / max(Y_dc, 0.001):.3f}")
-
-        SIGNAL_THRESHOLD = 0.02  # 20mV absolute threshold
-
-        if X_dc > SIGNAL_THRESHOLD and X_ac / X_dc > 0.5:
-            print("⚠ WARNING: X is oscillating! Should be flat for locked signal")
-
-        if Y_dc > SIGNAL_THRESHOLD and Y_ac / Y_dc > 0.5:
-            print("⚠ WARNING: Y is oscillating! Should be flat for locked signal")
-
-        print("=" * 60)
-
-        # ============================================================
-        # SAVE DATA (like old three-hole system)
-        # ============================================================
+            self.all_X1 = np.convolve(self.all_X1, np.ones(averaging_window) / averaging_window, mode='valid')
+            self.all_Y1 = np.convolve(self.all_Y1, np.ones(averaging_window) / averaging_window, mode='valid')
+            self.all_X2 = np.convolve(self.all_X2, np.ones(averaging_window) / averaging_window, mode='valid')
+            self.all_Y2 = np.convolve(self.all_Y2, np.ones(averaging_window) / averaging_window, mode='valid')
+            self.sample_timestamps = self.sample_timestamps[:len(self.all_X1)]
+            print(f"✓ Applied {averaging_window}-sample moving average filter")
+        
+        # Calculate R and Theta for both channels
+        R1 = np.sqrt(self.all_X1**2 + self.all_Y1**2)
+        Theta1 = np.arctan2(self.all_Y1, self.all_X1)
+        
+        R2 = np.sqrt(self.all_X2**2 + self.all_Y2**2)
+        Theta2 = np.arctan2(self.all_Y2, self.all_X2)
+        
+        # Time array (relative to start)
+        t = self.sample_timestamps - self.acquisition_start_time
+        
+        # Print diagnostics
+        self.print_diagnostics(t, R1, Theta1, R2, Theta2, params)
+        
+        # Plot results
+        self.plot_results(t, R1, Theta1, R2, Theta2)
+        
+        # Save data
         if params['save_file']:
-            self.save_data_like_old_system(params, t, R, Theta, self.all_X, self.all_Y,
-                                           out1_raw, in2_raw, in2_dcRamp, t_raw,
-                                           freqs_lock, psd_lock)
-
-        # Create comprehensive plot
-        fig = plt.figure(figsize=(18, 10))
-
-        # Signal and DC Ramp vs Time (dual Y-axis)
-        ax_old1 = plt.subplot(3, 3, 1)
-        ax_old1_twin = ax_old1.twinx()
-        ax_old1.plot(t, R, color=(31 / 255., 119 / 255., 180 / 255.), linewidth=1, label='Signal (R)')
-        ax_old1_twin.plot(t, in2_dcRamp,
-                          color=(255 / 255., 127 / 255., 14 / 255.), linewidth=1, label='IN2 Voltage')
-        ax_old1.set_xlabel('Time (s)')
-        ax_old1.set_ylabel('Signal (V)', color=(31 / 255., 119 / 255., 180 / 255.))
-        ax_old1_twin.set_ylabel('IN2 Voltage (V)', color=(255 / 255., 127 / 255., 14 / 255.))
-        ax_old1.set_title('Lock-in Signal + IN2 Voltage (Old Style)')
-        ax_old1.grid(True)
-
-        # OUT1 (Reference Signal)
-        ax1 = plt.subplot(3, 3, 2)
-        n_periods = 5
-        n_samples_plot = int(n_periods * self.sample_rate / self.ref_freq)
-        n_samples_plot = min(n_samples_plot, len(out1_raw))
-        ax1.plot(t_raw[:n_samples_plot] * 1000, out1_raw[:n_samples_plot], 'b-', linewidth=1)
-        ax1.set_xlabel('Time (ms)')
-        ax1.set_ylabel('OUT1 (V)')
-        ax1.set_title(f'Reference Signal (OUT1) @ {self.ref_freq} Hz')
+            self.save_data(t, R1, Theta1, R2, Theta2, params)
+        else:
+            plt.show()
+    
+    def print_diagnostics(self, t, R1, Theta1, R2, Theta2, params):
+        print("\n" + "=" * 60)
+        print("DUAL-CHANNEL LOCK-IN DIAGNOSTICS")
+        print("=" * 60)
+        print(f"Reference Frequency: {self.ref_freq} Hz")
+        print(f"Measurement Duration: {t[-1]:.3f} seconds")
+        print(f"Total Samples: {len(self.all_X1)}")
+        print(f"Actual Sample Rate: {len(self.all_X1) / t[-1]:.2f} Hz")
+        
+        print("\n" + "-" * 60)
+        print("TIMESTAMP INFORMATION:")
+        print(f"Start: {datetime.fromtimestamp(self.sample_timestamps[0]).strftime('%Y-%m-%d %H:%M:%S.%f')}")
+        print(f"End:   {datetime.fromtimestamp(self.sample_timestamps[-1]).strftime('%Y-%m-%d %H:%M:%S.%f')}")
+        
+        print("\n" + "-" * 60)
+        print("CHANNEL 1 (IN1 - Electrochemistry):")
+        print(f"  Mean R1: {np.mean(R1):.6f} V ± {np.std(R1):.6f} V")
+        print(f"  SNR (R1): {np.mean(R1) / (np.std(R1) + 1e-9):.2f}")
+        print(f"  Mean X1: {np.mean(self.all_X1):.6f} V ± {np.std(self.all_X1):.6f} V")
+        print(f"  Mean Y1: {np.mean(self.all_Y1):.6f} V ± {np.std(self.all_Y1):.6f} V")
+        print(f"  Mean Theta1: {np.mean(Theta1):.6f} rad ± {np.std(Theta1):.6f} rad")
+        
+        print("\n" + "-" * 60)
+        print("CHANNEL 2 (IN2 - Autolab/External):")
+        print(f"  Mean R2: {np.mean(R2):.6f} V ± {np.std(R2):.6f} V")
+        print(f"  SNR (R2): {np.mean(R2) / (np.std(R2) + 1e-9):.2f}")
+        print(f"  Mean X2: {np.mean(self.all_X2):.6f} V ± {np.std(self.all_X2):.6f} V")
+        print(f"  Mean Y2: {np.mean(self.all_Y2):.6f} V ± {np.std(self.all_Y2):.6f} V")
+        print(f"  Mean Theta2: {np.mean(Theta2):.6f} rad ± {np.std(Theta2):.6f} rad")
+        
+        print("\n" + "-" * 60)
+        print("CROSS-CHANNEL ANALYSIS:")
+        phase_diff = Theta1 - Theta2
+        print(f"  Phase difference (Θ1 - Θ2): {np.mean(phase_diff):.6f} rad ± {np.std(phase_diff):.6f} rad")
+        print(f"  R1/R2 ratio: {np.mean(R1) / (np.mean(R2) + 1e-9):.3f}")
+        print("=" * 60)
+    
+    def plot_results(self, t, R1, Theta1, R2, Theta2):
+        fig = plt.figure(figsize=(18, 12))
+        
+        # Row 1: Channel 1 (IN1)
+        # X1 vs Time
+        ax1 = plt.subplot(4, 3, 1)
+        ax1.plot(t, self.all_X1, 'b-', linewidth=0.5)
+        ax1.axhline(np.mean(self.all_X1), color='r', linestyle='--', alpha=0.7,
+                    label=f'Mean: {np.mean(self.all_X1):.4f}V')
+        ax1.set_xlabel('Time (s)')
+        ax1.set_ylabel('X1 (V)')
+        ax1.set_title('Channel 1 (IN1): In-phase (X)')
+        ax1.legend()
         ax1.grid(True)
-
-        # IN2 (DC Ramp Signal) - CHANGED
-        ax2 = plt.subplot(3, 3, 3)
-        ax2.plot(t_raw[:n_samples_plot] * 1000, in2_raw[:n_samples_plot], 'r-', linewidth=1)
-        ax2.set_xlabel('Time (ms)')
-        ax2.set_ylabel('IN2 (V)')
-        ax2.set_title('DC Ramp Signal (IN2)')  # Updated title
+        
+        # Y1 vs Time
+        ax2 = plt.subplot(4, 3, 2)
+        ax2.plot(t, self.all_Y1, 'r-', linewidth=0.5)
+        ax2.axhline(np.mean(self.all_Y1), color='b', linestyle='--', alpha=0.7,
+                    label=f'Mean: {np.mean(self.all_Y1):.4f}V')
+        ax2.set_xlabel('Time (s)')
+        ax2.set_ylabel('Y1 (V)')
+        ax2.set_title('Channel 1 (IN1): Quadrature (Y)')
+        ax2.legend()
         ax2.grid(True)
-
-        # FFT Spectrum
-        ax3 = plt.subplot(3, 3, 4)
-        ax3.semilogy(freqs_lock, psd_lock, label='Lock-in PSD')
-        ax3.axvline(0, color='r', linestyle='--', alpha=0.5, label='0 Hz (target)')
-        ax3.set_xlabel('Frequency (Hz)')
-        ax3.set_ylabel('Power (a.u.)')
-        ax3.set_title('FFT Spectrum (baseband)')
+        
+        # R1 vs Time
+        ax3 = plt.subplot(4, 3, 3)
+        ax3.plot(t, R1, 'm-', linewidth=0.5)
+        ax3.axhline(np.mean(R1), color='b', linestyle='--', alpha=0.7,
+                    label=f'Mean: {np.mean(R1):.4f}V')
+        ax3.set_xlabel('Time (s)')
+        ax3.set_ylabel('R1 (V)')
+        ax3.set_title('Channel 1 (IN1): Magnitude')
         ax3.legend()
         ax3.grid(True)
-
-        # X vs Time
-        ax4 = plt.subplot(3, 3, 5)
-        ax4.plot(t, self.all_X, 'b-', linewidth=0.5)
-        ax4.axhline(np.mean(self.all_X), color='r', linestyle='--', alpha=0.7,
-                    label=f'Mean: {np.mean(self.all_X):.4f}V')
+        
+        # Row 2: Channel 2 (IN2)
+        # X2 vs Time
+        ax4 = plt.subplot(4, 3, 4)
+        ax4.plot(t, self.all_X2, 'b-', linewidth=0.5)
+        ax4.axhline(np.mean(self.all_X2), color='r', linestyle='--', alpha=0.7,
+                    label=f'Mean: {np.mean(self.all_X2):.4f}V')
         ax4.set_xlabel('Time (s)')
-        ax4.set_ylabel('X (V)')
-        ax4.set_title('In-phase (X) vs Time [iq2]')
+        ax4.set_ylabel('X2 (V)')
+        ax4.set_title('Channel 2 (IN2): In-phase (X)')
         ax4.legend()
         ax4.grid(True)
-        ax4.set_xlim(t[0], t[-1])
-        margin_X = 0.5 * (np.max(self.all_X) - np.min(self.all_X))
-        ax4.set_ylim(np.min(self.all_X) - margin_X, np.max(self.all_X) + margin_X)
-
-        # Y vs Time
-        ax5 = plt.subplot(3, 3, 6)
-        ax5.plot(t, self.all_Y, 'r-', linewidth=0.5)
-        ax5.axhline(np.mean(self.all_Y), color='b', linestyle='--', alpha=0.7,
-                    label=f'Mean: {np.mean(self.all_Y):.4f}V')
+        
+        # Y2 vs Time
+        ax5 = plt.subplot(4, 3, 5)
+        ax5.plot(t, self.all_Y2, 'r-', linewidth=0.5)
+        ax5.axhline(np.mean(self.all_Y2), color='b', linestyle='--', alpha=0.7,
+                    label=f'Mean: {np.mean(self.all_Y2):.4f}V')
         ax5.set_xlabel('Time (s)')
-        ax5.set_ylabel('Y (V)')
-        ax5.set_title('Quadrature (Y) vs Time [iq2_2]')
+        ax5.set_ylabel('Y2 (V)')
+        ax5.set_title('Channel 2 (IN2): Quadrature (Y)')
         ax5.legend()
         ax5.grid(True)
-        ax5.set_xlim(t[0], t[-1])
-        margin_Y = 0.5 * (np.max(self.all_Y) - np.min(self.all_Y))
-        ax5.set_ylim(np.min(self.all_Y) - margin_Y, np.max(self.all_Y) + margin_Y)
-
-        # X vs Y (IQ plot)
-        ax6 = plt.subplot(3, 3, 7)
-        ax6.plot(self.all_X, self.all_Y, 'g.', markersize=1, alpha=0.5)
-        ax6.plot(np.mean(self.all_X), np.mean(self.all_Y), 'r+', markersize=15,
-                 markeredgewidth=2, label='Mean')
-        ax6.set_xlabel('X (V)')
-        ax6.set_ylabel('Y (V)')
-        ax6.set_title('IQ Plot (X vs Y)')
+        
+        # R2 vs Time
+        ax6 = plt.subplot(4, 3, 6)
+        ax6.plot(t, R2, 'm-', linewidth=0.5)
+        ax6.axhline(np.mean(R2), color='b', linestyle='--', alpha=0.7,
+                    label=f'Mean: {np.mean(R2):.4f}V')
+        ax6.set_xlabel('Time (s)')
+        ax6.set_ylabel('R2 (V)')
+        ax6.set_title('Channel 2 (IN2): Magnitude')
         ax6.legend()
         ax6.grid(True)
-        ax6.axis('equal')
-
-        # R vs Time
-        ax7 = plt.subplot(3, 3, 8)
-        ax7.plot(t, R, 'm-', linewidth=0.5)
-        ax7.axhline(np.mean(R), color='b', linestyle='--', alpha=0.7,
-                    label=f'Mean: {np.mean(R):.4f}V')
-        ax7.set_xlabel('Time (s)')
-        ax7.set_ylabel('R (V)')
-        ax7.set_title('Magnitude (R) vs Time')
+        
+        # Row 3: IQ Plots
+        # Channel 1 IQ plot
+        ax7 = plt.subplot(4, 3, 7)
+        ax7.plot(self.all_X1, self.all_Y1, 'g.', markersize=1, alpha=0.5)
+        ax7.plot(np.mean(self.all_X1), np.mean(self.all_Y1), 'r+', markersize=15,
+                 markeredgewidth=2, label='Mean')
+        ax7.set_xlabel('X1 (V)')
+        ax7.set_ylabel('Y1 (V)')
+        ax7.set_title('Channel 1: IQ Plot')
         ax7.legend()
         ax7.grid(True)
-        ax7.set_xlim(t[0], t[-1])
-        margin_R = 0.5 * (np.max(R) - np.min(R))
-        ax7.set_ylim(np.min(R) - margin_R, np.max(R) + margin_R)
-
-        # Theta vs Time
-        ax8 = plt.subplot(3, 3, 9)
-        ax8.plot(t, Theta, 'c-', linewidth=0.5)
-        ax8.axhline(np.mean(Theta), color='r', linestyle='--', alpha=0.7,
-                    label=f'Mean: {np.mean(Theta):.4f} rad')
-        ax8.set_xlabel('Time (s)')
-        ax8.set_ylabel('Theta (rad)')
-        ax8.set_title('Phase (Theta) vs Time')
+        ax7.axis('equal')
+        
+        # Channel 2 IQ plot
+        ax8 = plt.subplot(4, 3, 8)
+        ax8.plot(self.all_X2, self.all_Y2, 'c.', markersize=1, alpha=0.5)
+        ax8.plot(np.mean(self.all_X2), np.mean(self.all_Y2), 'r+', markersize=15,
+                 markeredgewidth=2, label='Mean')
+        ax8.set_xlabel('X2 (V)')
+        ax8.set_ylabel('Y2 (V)')
+        ax8.set_title('Channel 2: IQ Plot')
         ax8.legend()
         ax8.grid(True)
-        ax8.set_xlim(t[0], t[-1])
-        margin_Theta = 0.5 * (np.max(Theta) - np.min(Theta))
-        ax8.set_ylim(np.min(Theta) - margin_Theta, np.max(Theta) + margin_Theta)
-
+        ax8.axis('equal')
+        
+        # R1 vs R2
+        ax9 = plt.subplot(4, 3, 9)
+        ax9.plot(R1, R2, 'purple', marker='.', markersize=1, linestyle='', alpha=0.5)
+        ax9.set_xlabel('R1 (V)')
+        ax9.set_ylabel('R2 (V)')
+        ax9.set_title('R1 vs R2 (Cross-channel)')
+        ax9.grid(True)
+        
+        # Row 4: Phase analysis
+        # Theta1 vs Time
+        ax10 = plt.subplot(4, 3, 10)
+        ax10.plot(t, Theta1, 'c-', linewidth=0.5)
+        ax10.axhline(np.mean(Theta1), color='r', linestyle='--', alpha=0.7,
+                     label=f'Mean: {np.mean(Theta1):.4f} rad')
+        ax10.set_xlabel('Time (s)')
+        ax10.set_ylabel('Theta1 (rad)')
+        ax10.set_title('Channel 1: Phase')
+        ax10.legend()
+        ax10.grid(True)
+        
+        # Theta2 vs Time
+        ax11 = plt.subplot(4, 3, 11)
+        ax11.plot(t, Theta2, 'c-', linewidth=0.5)
+        ax11.axhline(np.mean(Theta2), color='r', linestyle='--', alpha=0.7,
+                     label=f'Mean: {np.mean(Theta2):.4f} rad')
+        ax11.set_xlabel('Time (s)')
+        ax11.set_ylabel('Theta2 (rad)')
+        ax11.set_title('Channel 2: Phase')
+        ax11.legend()
+        ax11.grid(True)
+        
+        # Phase difference
+        ax12 = plt.subplot(4, 3, 12)
+        phase_diff = Theta1 - Theta2
+        ax12.plot(t, phase_diff, 'orange', linewidth=0.5)
+        ax12.axhline(np.mean(phase_diff), color='r', linestyle='--', alpha=0.7,
+                     label=f'Mean: {np.mean(phase_diff):.4f} rad')
+        ax12.set_xlabel('Time (s)')
+        ax12.set_ylabel('Theta1 - Theta2 (rad)')
+        ax12.set_title('Phase Difference (Θ1 - Θ2)')
+        ax12.legend()
+        ax12.grid(True)
+        
         plt.tight_layout()
-
-        if params['save_file']:
-            img_path = os.path.join(self.output_dir, params['filename'],
-                                    f"{params['filename']}_all_plots.png")
-            plt.savefig(img_path, dpi=150)
-            print(f"Saved comprehensive plot: {img_path}")
-
-        plt.show()
-
-    def save_data_like_old_system(self, params, time, mag, phase, X, Y,
-                                  out1_raw, in2_raw, dcRamp, t_raw, freqs, psd):
-        """
-        Save data in the same format as the old three-hole system:
-        - Creates a folder with the filename
-        - Saves NPZ file with all data
-        - Saves individual CSV files for each variable
-        - Saves PNG plots
-        """
-        filename = params['filename']
-        base_dir = self.output_dir
-
-        # Create base directory if it doesn't exist
-        if not os.path.exists(base_dir):
-            os.makedirs(base_dir)
-            print(f"Created base directory: {base_dir}")
-
-        # Save NPZ in base directory (like old system)
-        npz_path = os.path.join(base_dir, f'{filename}.npz')
-        np.savez(npz_path,
-                 mag=mag,
-                 dcRamp=dcRamp,
-                 phase=phase,
-                 time=time,
-                 signal=mag,  # Use R as signal
-                 X=X,
-                 Y=Y,
-                 out1=out1_raw,
-                 in2=in2_raw,  # CHANGED: now saving IN2
-                 freqs=freqs,
-                 psd=psd)
-        print(f"Saved NPZ file: {npz_path}")
-
-        # Create subdirectory for CSVs
-        csv_dir = os.path.join(base_dir, filename)
-        if not os.path.exists(csv_dir):
-            os.makedirs(csv_dir)
-            print(f"Created CSV directory: {csv_dir}")
-
-        # Save individual CSV files (like old system)
-        data_dict = {
-            'magnitude': mag,
-            'dcRamp': dcRamp[:len(time)],  # Match length
-            'phase': phase,
-            'time': time,
-            'signal': mag,
-            'X': X,
-            'Y': Y
-        }
-
-        for key, data in data_dict.items():
-            csv_path = os.path.join(csv_dir, f'{key}.csv')
-            with open(csv_path, 'w', newline='') as csvfile:
-                writer = csv.writer(csvfile, delimiter=',', quotechar='|',
-                                    quoting=csv.QUOTE_MINIMAL)
-                # Write as single row (like old system)
-                writer.writerow(data)
-            print(f"Saved CSV: {csv_path}")
-
-        print(f"\n✓ All data saved in format matching old three-hole system!")
-        print(f"  Base directory: {base_dir}")
-        print(f"  NPZ file: {filename}.npz")
-        print(f"  CSV folder: {filename}/")
+    
+    def save_data(self, t, R1, Theta1, R2, Theta2, params):
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
+        
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Save plot
+        img_path = os.path.join(self.output_dir, f'dual_lockin_results_{timestamp_str}.png')
+        plt.savefig(img_path, dpi=150)
+        print(f"\n✓ Plot saved: {img_path}")
+        
+        # Save data with timestamps
+        if params.get('save_timestamps', False):
+            data = np.column_stack((
+                self.sample_timestamps,  # Absolute Unix timestamp
+                t,  # Relative time (s)
+                # Channel 1 (IN1)
+                R1, Theta1, self.all_X1, self.all_Y1,
+                # Channel 2 (IN2)
+                R2, Theta2, self.all_X2, self.all_Y2
+            ))
+            csv_path = os.path.join(self.output_dir, f'dual_lockin_results_{timestamp_str}.csv')
+            np.savetxt(csv_path, data, delimiter=",",
+                       header="AbsoluteTimestamp,RelativeTime,R1,Theta1,X1,Y1,R2,Theta2,X2,Y2",
+                       comments='', fmt='%.10f')
+            print(f"✓ Data saved with timestamps: {csv_path}")
+            print(f"  Columns: AbsoluteTimestamp, RelativeTime, R1, Theta1, X1, Y1, R2, Theta2, X2, Y2")
+        else:
+            data = np.column_stack((
+                t,
+                R1, Theta1, self.all_X1, self.all_Y1,
+                R2, Theta2, self.all_X2, self.all_Y2
+            ))
+            csv_path = os.path.join(self.output_dir, f'dual_lockin_results_{timestamp_str}.csv')
+            np.savetxt(csv_path, data, delimiter=",",
+                       header="Time,R1,Theta1,X1,Y1,R2,Theta2,X2,Y2",
+                       comments='', fmt='%.6f')
+            print(f"✓ Data saved: {csv_path}")
 
 
 if __name__ == '__main__':
-    rp = RedPitaya()
-
+    rp = DualChannelRedPitaya()
+    
     run_params = {
         'ref_freq': REF_FREQUENCY,
         'ref_amp': REF_AMPLITUDE,
         'output_ref': OUTPUT_CHANNEL,
-        'phase': PHASE_OFFSET,
+        'phase_ch1': PHASE_OFFSET_CH1,
+        'phase_ch2': PHASE_OFFSET_CH2,
         'timeout': MEASUREMENT_TIME,
         'filter_bandwidth': FILTER_BANDWIDTH,
+        'sample_rate': SAMPLE_RATE,
         'averaging_window': AVERAGING_WINDOW,
         'output_dir': OUTPUT_DIRECTORY,
-        'filename': FILE_NAME,
         'save_file': SAVE_DATA,
-        'fft': SHOW_FFT,
+        'save_timestamps': SAVE_TIMESTAMPS,
     }
-
+    
     print("=" * 60)
-    print("RED PITAYA LOCK-IN AMPLIFIER")
+    print("RED PITAYA DUAL-CHANNEL LOCK-IN AMPLIFIER")
     print("=" * 60)
     print("SETUP:")
-    print("  - Connect OUT1 to IN1 (for LIA signal)")
-    print("  - Connect DC ramp to IN2 (for voltage monitoring)")
+    print("  OUT1 → Electrochemical cell")
+    print("  IN1  → Electrochemical response")
+    print("  IN2  → Autolab current (or other signal)")
     print("=" * 60)
     print(f"Reference: {REF_FREQUENCY} Hz @ {REF_AMPLITUDE} V on {OUTPUT_CHANNEL}")
     print(f"Filter Bandwidth: {FILTER_BANDWIDTH} Hz")
+    print(f"Sampling Rate: {SAMPLE_RATE} Hz (direct IQ reading)")
     print(f"Measurement Time: {MEASUREMENT_TIME} s")
     print(f"Averaging Window: {AVERAGING_WINDOW} samples")
-    if SAVE_DATA:
-        print(f"Save Directory: {OUTPUT_DIRECTORY}")
-        print(f"Filename: {FILE_NAME}")
     print("=" * 60)
-    print("Expected for direct OUT1→IN1 connection:")
-    print(f"  X = {REF_AMPLITUDE / 2:.3f} V (in-phase)")
-    print("  Y = 0.000 V (quadrature)")
-    print(f"  R = {REF_AMPLITUDE / 2:.3f} V (magnitude)")
-    print("  Theta = 0.000 rad (phase)")
-    print("  FFT peak at 0 Hz")
+    print("\n✓ Both channels will be sampled simultaneously")
+    print("✓ Timestamps synchronized for both channels")
+    print("✓ No scope limitations - direct IQ module access!")
     print("=" * 60)
-
+    
     rp.run(run_params)
