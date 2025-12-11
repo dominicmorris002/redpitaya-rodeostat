@@ -24,6 +24,18 @@ OUTPUT_CHANNEL = 'out1'  # 'out1' or 'out2' - where to send AC signal
 PHASE_OFFSET = 0  # degrees - phase adjustment (0, 90, 180, 270)
 MEASUREMENT_TIME = 30.0  # seconds - how long to measure
 
+# INPUT MODE CONFIGURATION
+# Set the expected input voltage range based on your Red Pitaya's jumper settings
+# IMPORTANT: This should match your physical jumper configuration!
+# - Open your Red Pitaya and check the jumpers on IN1/IN2
+# - LV mode: Direct connection, ±1V range (best for low voltage signals)
+# - HV mode: 20:1 voltage divider, ±20V range (for higher voltage signals)
+INPUT_MODE = 'AUTO'  # Options: 'LV' (±1V), 'HV' (±20V), 'AUTO' (detect automatically)
+
+# Manual gain override (only used if AUTO_CALIBRATE = False)
+# If you know your system's gain factor, you can set it here
+MANUAL_GAIN_FACTOR = 1.0  # 1.0 = no correction, >1.0 = compensate for attenuation
+
 # LOCK-IN FILTER BANDWIDTH
 FILTER_BANDWIDTH = 10  # Hz - lower = cleaner, higher = faster response
 
@@ -40,6 +52,7 @@ SHOW_FFT = True
 
 # Calibration settings
 AUTO_CALIBRATE = True  # Auto-detect input attenuation and compensate
+# Set to False if you want to use manual gain or trust raw readings
 CALIBRATION_TIME = 2.0  # seconds - how long to measure for calibration
 
 # Synchronization settings
@@ -70,7 +83,7 @@ class RedPitaya:
     current_scaling_map = {'10mA': 65, '1mA': 600, '100uA': 6000, '10uA': 60000}
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
-    def __init__(self, output_dir='test_data'):
+    def __init__(self, output_dir='test_data', input_mode='AUTO', manual_gain=1.0):
         self.rp = Pyrpl(config='lockin_config', hostname='rp-f073ce.local')
 
         self.output_dir = output_dir
@@ -87,9 +100,27 @@ class RedPitaya:
         self.capture_timestamps = []
         self.acquisition_start_time = None
 
-        # Calibration
-        self.input_gain_factor = 1.0  # Will be measured during calibration
-        self.input_mode = "Unknown"  # "LV (±1V)" or "HV (±20V)"
+        # Calibration and input mode settings
+        self.input_gain_factor = manual_gain  # Default to manual gain
+        self.input_mode_setting = input_mode.upper()  # 'LV', 'HV', or 'AUTO'
+        self.input_mode = "Unknown"  # Detected mode (will be set during calibration or init)
+
+        # Set expected gain based on mode if not AUTO
+        if self.input_mode_setting == 'LV':
+            self.input_gain_factor = 1.0
+            self.input_mode = "LV (±1V) - Manual"
+            print(f"⚙ Input mode set to: {self.input_mode}")
+        elif self.input_mode_setting == 'HV':
+            self.input_gain_factor = 20.0  # Theoretical 20:1 divider
+            self.input_mode = "HV (±20V) - Manual (20:1 divider)"
+            print(f"⚙ Input mode set to: {self.input_mode}")
+        elif self.input_mode_setting == 'AUTO':
+            self.input_mode = "AUTO - Will calibrate"
+            print(f"⚙ Input mode set to: AUTO (will auto-detect)")
+        else:
+            print(f"⚠ Warning: Unknown input mode '{input_mode}', defaulting to AUTO")
+            self.input_mode_setting = 'AUTO'
+            self.input_mode = "AUTO - Will calibrate"
 
         self.pid = self.rp_modules.pid0
         self.kp = self.pid.p
@@ -112,11 +143,20 @@ class RedPitaya:
         self.scope.average = 'true'
         self.sample_rate = 125e6 / self.scope.decimation
 
-    def calibrate_input_gain(self, cal_freq=100, cal_amp=1.0, cal_time=2.0):
+    def calibrate_input_gain(self, cal_freq=100, cal_amp=1.0, cal_time=2.0, force=False):
         """
         Calibrate input gain by generating known signal and measuring response.
         This detects if we're in LV (±1V) or HV (±20V) mode.
+
+        Args:
+            force: If True, always calibrate. If False, skip if mode is manually set.
         """
+        # Skip calibration if mode is manually set (unless forced)
+        if not force and self.input_mode_setting != 'AUTO':
+            print(f"\n⚙ Skipping calibration - using manual mode: {self.input_mode}")
+            print(f"   Gain factor: {self.input_gain_factor:.4f}x")
+            return self.input_gain_factor
+
         print("\n" + "=" * 60)
         print("CALIBRATING INPUT GAIN...")
         print("=" * 60)
@@ -170,15 +210,19 @@ class RedPitaya:
         # Determine input mode based on attenuation
         if self.input_gain_factor < 1.05:
             self.input_mode = "LV (±1V) - Direct"
-            mode_detail = "Jumpers set to Low Voltage mode"
+            mode_detail = "Jumpers set to Low Voltage mode (no divider)"
         elif 1.05 <= self.input_gain_factor < 1.15:
             self.input_mode = "LV (±1V) - with loading"
-            mode_detail = "Jumpers likely in LV mode with some impedance loading"
+            mode_detail = "Jumpers in LV mode with minor impedance loading (~8%)"
+        elif 1.15 <= self.input_gain_factor < 15:
+            attenuation_ratio = 1.0 / self.input_gain_factor
+            self.input_mode = f"Unknown attenuation - {attenuation_ratio:.2f}:1"
+            mode_detail = f"Unexpected attenuation detected (gain factor {self.input_gain_factor:.2f}x)"
         else:
-            # Significant attenuation suggests voltage divider
+            # Significant attenuation suggests HV mode voltage divider
             attenuation_ratio = 1.0 / self.input_gain_factor
             self.input_mode = f"HV (±20V) - {attenuation_ratio:.1f}:1 divider"
-            mode_detail = "Jumpers set to High Voltage mode with voltage divider"
+            mode_detail = "Jumpers set to High Voltage mode with 20:1 voltage divider"
 
         print("-" * 60)
         print("CALIBRATION RESULTS:")
@@ -548,7 +592,12 @@ class RedPitaya:
 
 
 if __name__ == '__main__':
-    rp = RedPitaya()
+    # Initialize with input mode settings
+    rp = RedPitaya(
+        output_dir=OUTPUT_DIRECTORY,
+        input_mode=INPUT_MODE,
+        manual_gain=MANUAL_GAIN_FACTOR
+    )
 
     run_params = {
         'ref_freq': REF_FREQUENCY,
@@ -575,6 +624,7 @@ if __name__ == '__main__':
     print(f"Filter Bandwidth: {FILTER_BANDWIDTH} Hz")
     print(f"Measurement Time: {MEASUREMENT_TIME} s")
     print(f"Averaging Window: {AVERAGING_WINDOW} samples")
+    print(f"Input Mode Setting: {INPUT_MODE}")
     print(f"Auto-Calibration: {AUTO_CALIBRATE}")
     print(f"Save Timestamps: {SAVE_TIMESTAMPS}")
     print("=" * 60)
@@ -586,8 +636,14 @@ if __name__ == '__main__':
     print("  FFT peak at 0 Hz")
     print("=" * 60)
 
-    if AUTO_CALIBRATE:
+    if INPUT_MODE.upper() == 'AUTO' and AUTO_CALIBRATE:
         print("\nNOTE: Auto-calibration will detect LV/HV mode and correct all measurements")
+    elif INPUT_MODE.upper() == 'LV':
+        print("\nNOTE: Input mode manually set to LV (±1V range)")
+        print("      Make sure your Red Pitaya jumpers are set to LV!")
+    elif INPUT_MODE.upper() == 'HV':
+        print("\nNOTE: Input mode manually set to HV (±20V range, 20:1 divider)")
+        print("      Make sure your Red Pitaya jumpers are set to HV!")
     print("=" * 60)
 
-    rp.run(run_params)
+    rp.run(run_params) 
