@@ -138,10 +138,10 @@ class RedPitaya:
         # Calculate actual sample rate from timestamps
         actual_sample_rate = len(self.all_in1) / (t[-1] - t[0]) if t[-1] > t[0] else 0
         sample_rate_error = abs(actual_sample_rate - self.sample_rate) / self.sample_rate * 100
-        
+
         print(f"Actual Sample Rate: {actual_sample_rate:.2f} Hz")
         print(f"Sample Rate Error: {sample_rate_error:.3f}%")
-        
+
         if sample_rate_error > 1.0:
             print(f"⚠ WARNING: Sample rate error is {sample_rate_error:.3f}% (expected < 1%)")
         else:
@@ -159,7 +159,7 @@ class RedPitaya:
 
         # Create single plot - just voltage vs time
         fig = plt.figure(figsize=(14, 6))
-        
+
         ax = plt.subplot(1, 1, 1)
         ax.plot(t, self.all_in1, 'b-', linewidth=0.8, label='DC Voltage')
         ax.axhline(np.mean(self.all_in1), color='r', linestyle='--', linewidth=2, alpha=0.7,
@@ -170,10 +170,10 @@ class RedPitaya:
         ax.legend(fontsize=10)
         ax.grid(True, alpha=0.3)
         ax.set_xlim(t[0], t[-1])
-        
+
         # Add stats text box
         stats_text = f'Samples: {len(self.all_in1):,}\nDuration: {t[-1]:.2f} s\nStd Dev: {np.std(self.all_in1):.6f} V'
-        ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
+        ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
                 fontsize=10, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
@@ -211,7 +211,7 @@ class RedPitaya:
                 np.savetxt(csv_path, data, delimiter=",",
                            header="Time,Voltage", comments='', fmt='%.6f')
                 print(f"✓ Data saved: {csv_path}")
-        
+
         plt.show()
 
 
