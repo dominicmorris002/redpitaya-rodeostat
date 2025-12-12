@@ -1,7 +1,7 @@
 """
 Combined Red Pitaya Lock-In Amplifier and DC Voltage Monitor
 
-SETUP: 
+SETUP:
 - Red Pitaya 1 (rp-f073ce.local): Lock-in amplifier with OUT1 connected to IN1
 - Red Pitaya 2 (rp-f0909c.local): DC voltage monitor on IN1
 
@@ -380,11 +380,11 @@ class RedPitayaLockIn:
                 os.makedirs(self.output_dir)
 
             timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            data = np.column_stack((self.t, self.R, self.Theta, self.all_X, self.all_Y))
+            data = np.column_stack((self.sample_timestamps, self.t, self.R, self.Theta, self.all_X, self.all_Y))
             csv_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.csv')
             np.savetxt(csv_path, data, delimiter=",",
-                       header="Time,R,Theta,X,Y", comments='', fmt='%.6f')
-            print(f"✓ Lock-in data saved: {csv_path}")
+                       header="AbsoluteTime,RelativeTime,R,Theta,X,Y", comments='', fmt='%.6f')
+            print(f"✓ Lock-in data saved with absolute and relative timestamps: {csv_path}")
 
 
 class RedPitayaDCMonitor:
@@ -491,11 +491,11 @@ class RedPitayaDCMonitor:
                 os.makedirs(self.output_dir)
 
             timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            data = np.column_stack((self.t, self.all_in1))
+            data = np.column_stack((self.sample_timestamps, self.t, self.all_in1))
             csv_path = os.path.join(self.output_dir, f'dc_voltage_{timestamp_str}.csv')
             np.savetxt(csv_path, data, delimiter=",",
-                       header="Time,Voltage", comments='', fmt='%.6f')
-            print(f"✓ DC voltage data saved: {csv_path}")
+                       header="AbsoluteTime,RelativeTime,Voltage", comments='', fmt='%.6f')
+            print(f"✓ DC voltage data saved with absolute and relative timestamps: {csv_path}")
 
 
 if __name__ == '__main__':
@@ -504,7 +504,7 @@ if __name__ == '__main__':
     print("=" * 60)
     print("Initializing Lock-In Amplifier (rp-f073ce.local)...")
     print("=" * 60)
-    
+
     rp_lockin = RedPitayaLockIn(
         output_dir=OUTPUT_DIRECTORY,
         input_mode=LOCKIN_INPUT_MODE,
@@ -548,6 +548,58 @@ if __name__ == '__main__':
     print("\n" + "=" * 60)
     print("Running DC Voltage Monitor...")
     rp_dc.run(dc_params)
+    print("\n" + "=" * 60)
+    print("Combining CSV data...")
+    print("=" * 60)
+
+    # ----- Get all timestamps and measurements -----
+    t_lock_abs = rp_lockin.sample_timestamps  # RP1 absolute timestamps
+    t_dc_abs = rp_dc.sample_timestamps  # RP2 absolute timestamps
+
+    t_lock_rel = rp_lockin.t  # RP1 relative time
+    t_dc_rel = rp_dc.sample_timestamps - rp_dc.acquisition_start_time  # RP2 relative time
+
+    R = rp_lockin.R
+    Theta = rp_lockin.Theta
+    X = rp_lockin.all_X
+    Y = rp_lockin.all_Y
+    Vdc = rp_dc.all_in1
+
+    # ----- Build combined CSV -----
+    # Note: if arrays have different lengths, pad the shorter with NaNs
+    len_lock = len(t_lock_abs)
+    len_dc = len(t_dc_abs)
+    max_len = max(len_lock, len_dc)
+
+
+    def pad(arr, target_len):
+        if len(arr) < target_len:
+            return np.concatenate([arr, np.full(target_len - len(arr), np.nan)])
+        else:
+            return arr
+
+
+    combined = np.column_stack([
+        pad(t_lock_abs, max_len),
+        pad(t_dc_abs, max_len),
+        pad(t_lock_rel, max_len),
+        pad(t_dc_rel, max_len),
+        pad(R, max_len),
+        pad(Theta, max_len),
+        pad(X, max_len),
+        pad(Y, max_len),
+        pad(Vdc, max_len)
+    ])
+
+    # ----- Save CSV -----
+    if SAVE_DATA:
+        if not os.path.exists(OUTPUT_DIRECTORY):
+            os.makedirs(OUTPUT_DIRECTORY)
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_path = os.path.join(OUTPUT_DIRECTORY, f'combined_lockin_dc_{timestamp_str}.csv')
+        header = "Time_RP1_Abs,Time_RP2_Abs,Time_RP1_Rel,Time_RP2_Rel,R,Theta,X,Y,DC_voltage"
+        np.savetxt(csv_path, combined, delimiter=",", header=header, comments='', fmt="%.6f")
+        print(f"✓ Combined CSV saved: {csv_path}")
 
     # Create combined plot
     print("\n" + "=" * 60)
