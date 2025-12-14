@@ -28,6 +28,10 @@ DECIMATION = 8192
 
 # Synchronization settings
 SAVE_TIMESTAMPS = True  # Save absolute timestamps for sync with other instruments
+
+# HV/LV MODE - Set this to match your physical jumper position
+VOLTAGE_MODE = 'LV'  # 'LV' for ±1V range (jumper in LV position)
+                     # 'HV' for ±20V range (jumper in HV position)
 # ============================================================
 
 from pyrpl import Pyrpl
@@ -41,7 +45,7 @@ from datetime import datetime
 class RedPitaya:
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
-    def __init__(self, output_dir='test_data'):
+    def __init__(self, output_dir='test_data', voltage_mode='LV'):
         self.rp = Pyrpl(config='dc_monitor_config', hostname='rp-f0909c.local')
         self.output_dir = output_dir
         self.rp_modules = self.rp.rp
@@ -51,6 +55,13 @@ class RedPitaya:
         # Store capture timestamps
         self.capture_timestamps = []
         self.acquisition_start_time = None
+
+        # Set voltage mode and scale factor
+        self.voltage_mode = voltage_mode.upper()
+        if self.voltage_mode == 'HV':
+            self.scale_factor = 20.0  # HV mode has 1:20 attenuator
+        else:
+            self.scale_factor = 1.0   # LV mode is 1:1
 
         self.scope = self.rp_modules.scope
 
@@ -75,6 +86,9 @@ class RedPitaya:
 
         self.scope.single()
         ch1 = np.array(self.scope._data_ch1_current)  # in1 = DC voltage
+        
+        # Apply scale factor for HV/LV mode
+        ch1 = ch1 * self.scale_factor
 
         self.in1_data.append(ch1)
         self.capture_timestamps.append(capture_time)
@@ -131,6 +145,7 @@ class RedPitaya:
         print("=" * 60)
         print("DC VOLTAGE DIAGNOSTICS")
         print("=" * 60)
+        print(f"Voltage Mode: {self.voltage_mode} (±{1.0 * self.scale_factor:.0f}V range)")
         print(f"Expected Sample Rate: {self.sample_rate:.2f} Hz")
         print(f"Total Samples: {len(self.all_in1)}")
         print(f"Measurement Duration: {t[-1]:.3f} seconds")
@@ -216,7 +231,7 @@ class RedPitaya:
 
 
 if __name__ == '__main__':
-    rp = RedPitaya()
+    rp = RedPitaya(voltage_mode=VOLTAGE_MODE)
 
     run_params = {
         'timeout': MEASUREMENT_TIME,
@@ -231,6 +246,7 @@ if __name__ == '__main__':
     print("=" * 60)
     print("SETUP: Connect your DC voltage source to IN1")
     print("=" * 60)
+    print(f"Voltage Mode: {VOLTAGE_MODE}")
     print(f"Measurement Time: {MEASUREMENT_TIME} s")
     print(f"Decimation: {DECIMATION}")
     print(f"Expected Sample Rate: {125e6 / DECIMATION:.2f} Hz")
