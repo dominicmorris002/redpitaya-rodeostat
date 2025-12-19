@@ -6,7 +6,7 @@ Purpose:
 - Measure it back on IN1 (HV mode)
 - Apply TWO gain factors:
     1) Red Pitaya input gain (HV divider, user-corrected)
-    2) Autolab monitor output gain (from Metrohm / Karen Michalski specs)
+    2) Autolab monitor output gain (manual, per range)
 
 This file is intentionally SIMPLE and does NOT use the lock-in.
 It is meant for DC sanity checks and gain verification.
@@ -36,26 +36,22 @@ MEASUREMENT_TIME = 5.0
 REDPITAYA_INPUT_MODE = 'HV'   # 'LV' or 'HV'
 
 # Optional manual correction if your HV divider is slightly off
-# Example: measured 0.048 V when expecting 0.050 V → gain = 0.050 / 0.048 = 1.0417
 REDPITAYA_GAIN_CORRECTION = 1.0
 
-# ================= AUTOLAB SETTINGS =================
-
 # Which Autolab monitor output are you using?
-# Options: 'Eout' or 'Iout'
-AUTOLAB_OUTPUT = 'Eout'
+AUTOLAB_OUTPUT = 'Eout'  # 'Eout' or 'Iout'
 
-# Autolab output impedance (from Metrohm)
-AUTOLAB_OUTPUT_IMPEDANCE_OHMS = 50.0
+# ================= MANUAL AUTOLAB GAINS =================
+# Fill in these once you know or measure them
 
-# Load impedance (Red Pitaya IN1 ≈ 1 MΩ)
-LOAD_IMPEDANCE_OHMS = 1_000_000.0
+# Example: for Iout, gain = V_out / I_applied (V/A)
+# For Eout, gain = V_out / E_applied (V/V)
+AUTOLAB_MANUAL_GAINS = {
+    'Eout': 1.0,   # Replace 1.0 with your measured V/V
+    'Iout': 1e6    # Replace 1e6 with your measured V/A
+}
 
 # ==================================================
-
-# ---------- Autolab gain calculation ----------
-# Voltage divider correction due to 50 Ω output impedance
-AUTOLAB_GAIN_CORRECTION = (LOAD_IMPEDANCE_OHMS + AUTOLAB_OUTPUT_IMPEDANCE_OHMS) / LOAD_IMPEDANCE_OHMS
 
 # ---------- Red Pitaya nominal gain ----------
 if REDPITAYA_INPUT_MODE.upper() == 'LV':
@@ -66,7 +62,8 @@ else:
     raise ValueError("REDPITAYA_INPUT_MODE must be 'LV' or 'HV'")
 
 # Total gain correction
-TOTAL_GAIN = REDPITAYA_NOMINAL_GAIN * REDPITAYA_GAIN_CORRECTION * AUTOLAB_GAIN_CORRECTION
+AUTOLAB_GAIN = AUTOLAB_MANUAL_GAINS.get(AUTOLAB_OUTPUT, 1.0)
+TOTAL_GAIN = REDPITAYA_NOMINAL_GAIN * REDPITAYA_GAIN_CORRECTION * AUTOLAB_GAIN
 
 print("=" * 60)
 print("RED PITAYA DC GAIN TEST")
@@ -76,7 +73,7 @@ print(f"Red Pitaya Mode: {REDPITAYA_INPUT_MODE}")
 print(f"Red Pitaya Nominal Gain: {REDPITAYA_NOMINAL_GAIN:.2f}x")
 print(f"Red Pitaya Manual Correction: {REDPITAYA_GAIN_CORRECTION:.6f}x")
 print(f"Autolab Output: {AUTOLAB_OUTPUT}")
-print(f"Autolab Gain Correction (50Ω → load): {AUTOLAB_GAIN_CORRECTION:.6f}x")
+print(f"Autolab Manual Gain: {AUTOLAB_GAIN:.6e}x")
 print(f"TOTAL GAIN CORRECTION: {TOTAL_GAIN:.6f}x")
 print("=" * 60)
 
