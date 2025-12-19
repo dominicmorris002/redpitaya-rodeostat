@@ -1,12 +1,15 @@
 """
-Red Pitaya Lock-In Amplifier - WITH AUTO-CALIBRATION & TIMESTAMP SYNC
+Red Pitaya Lock-In Amplifier - WITH AUTO-CALIBRATION & MANUAL GAIN & TIMESTAMP SYNC
 
 SETUP: Connect OUT1 directly to IN1 with a cable
 
-This version automatically calibrates for input attenuation (LV/HV jumper settings)
-and adds precise timestamps for synchronization with external DAQ systems.
+This version supports three input mode options:
+1. 'AUTO' - Automatically calibrates and detects LV/HV mode
+2. 'LV' or 'HV' - Uses theoretical gain (1.0x or 20.0x)
+3. 'MANUAL' - Uses your custom gain factor directly
 
 NEW FEATURES:
+- Manual gain mode: Set INPUT_MODE = 'MANUAL' and MANUAL_GAIN_FACTOR = 27 for 27x correction
 - Auto-calibration: Measures actual input gain and compensates
 - Input mode detection: Shows if in LV (±1V) or HV (±20V) mode
 - Corrected measurements: All values adjusted for actual hardware gain
@@ -15,26 +18,44 @@ IQ MODULE OUTPUTS:
 - For iq2 module: iq2 = X (in-phase), iq2_2 = Y (quadrature)
 """
 
+from datetime import datetime
+import time
+
+START_TIME_FILE = "start_time.txt"
+
+with open(START_TIME_FILE, "r") as f:
+    START_TIME = datetime.fromisoformat(f.read().strip())
+
+# Wait until start time
+while datetime.now() < START_TIME:
+    time.sleep(0.001)  # 1 ms resolution
+
 # ============================================================
 # MEASUREMENT PARAMETERS - CHANGE THESE
 # ============================================================
-REF_FREQUENCY = 100  # Hz - AC excitation frequency
+REF_FREQUENCY = 500  # Hz - AC excitation frequency
 REF_AMPLITUDE = 1  # V - AC signal amplitude (will appear on OUT1)
 OUTPUT_CHANNEL = 'out1'  # 'out1' or 'out2' - where to send AC signal
 PHASE_OFFSET = 0  # degrees - phase adjustment (0, 90, 180, 270)
 MEASUREMENT_TIME = 30.0  # seconds - how long to measure
 
 # INPUT MODE CONFIGURATION
-# Set the expected input voltage range based on your Red Pitaya's jumper settings
-# IMPORTANT: This should match your physical jumper configuration!
-# - Open your Red Pitaya and check the jumpers on IN1/IN2
-# - LV mode: Direct connection, ±1V range (best for low voltage signals)
-# - HV mode: 20:1 voltage divider, ±20V range (for higher voltage signals)
-INPUT_MODE = 'AUTO'  # Options: 'LV' (±1V), 'HV' (±20V), 'AUTO' (detect automatically)
+# Set the input voltage range and gain correction method
+# Options:
+#   'AUTO' - Auto-calibrate and detect LV/HV mode (recommended for first use)
+#   'LV'   - Low Voltage mode (±1V), uses 1.0x gain
+#   'HV'   - High Voltage mode (±20V), uses 20.0x theoretical gain
+#   'MANUAL' - Use custom gain factor (see MANUAL_GAIN_FACTOR below)
+INPUT_MODE = 'Manual'
 
-# Manual gain override (only used if AUTO_CALIBRATE = False)
-# If you know your system's gain factor, you can set it here
-MANUAL_GAIN_FACTOR = 1.0  # 1.0 = no correction, >1.0 = compensate for attenuation
+# MANUAL GAIN FACTOR (only used when INPUT_MODE = 'MANUAL')
+# If you know your system needs a specific gain correction, set it here
+# Examples:
+#   MANUAL_GAIN_FACTOR = 1.0   -> No correction
+#   MANUAL_GAIN_FACTOR = 27    -> 27x gain correction
+#   MANUAL_GAIN_FACTOR = 0.5   -> 0.5x gain correction (signal amplification)
+# This will multiply all measured voltages by this factor
+MANUAL_GAIN_FACTOR = 27.80999388
 
 # LOCK-IN FILTER BANDWIDTH
 FILTER_BANDWIDTH = 10  # Hz - lower = cleaner, higher = faster response
@@ -50,9 +71,8 @@ OUTPUT_DIRECTORY = 'test_data'
 DECIMATION = 8192
 SHOW_FFT = True
 
-# Calibration settings
+# Calibration settings (only used if INPUT_MODE = 'AUTO')
 AUTO_CALIBRATE = True  # Auto-detect input attenuation and compensate
-# Set to False if you want to use manual gain or trust raw readings
 CALIBRATION_TIME = 2.0  # seconds - how long to measure for calibration
 
 # Synchronization settings
@@ -102,11 +122,16 @@ class RedPitaya:
 
         # Calibration and input mode settings
         self.input_gain_factor = manual_gain  # Default to manual gain
-        self.input_mode_setting = input_mode.upper()  # 'LV', 'HV', or 'AUTO'
+        self.input_mode_setting = input_mode.upper()  # 'LV', 'HV', 'AUTO', or 'MANUAL'
         self.input_mode = "Unknown"  # Detected mode (will be set during calibration or init)
 
         # Set expected gain based on mode if not AUTO
-        if self.input_mode_setting == 'LV':
+        if self.input_mode_setting == 'MANUAL':
+            self.input_gain_factor = manual_gain
+            self.input_mode = f"MANUAL - {manual_gain}x gain"
+            print(f"⚙ Input mode set to: {self.input_mode}")
+            print(f"   All measurements will be multiplied by {manual_gain}x")
+        elif self.input_mode_setting == 'LV':
             self.input_gain_factor = 1.0
             self.input_mode = "LV (±1V) - Manual"
             print(f"⚙ Input mode set to: {self.input_mode}")
@@ -616,7 +641,7 @@ if __name__ == '__main__':
     }
 
     print("=" * 60)
-    print("RED PITAYA LOCK-IN AMPLIFIER - WITH AUTO-CALIBRATION")
+    print("RED PITAYA LOCK-IN AMPLIFIER - WITH MANUAL GAIN SUPPORT")
     print("=" * 60)
     print("SETUP: Connect OUT1 directly to IN1")
     print("=" * 60)
@@ -625,18 +650,33 @@ if __name__ == '__main__':
     print(f"Measurement Time: {MEASUREMENT_TIME} s")
     print(f"Averaging Window: {AVERAGING_WINDOW} samples")
     print(f"Input Mode Setting: {INPUT_MODE}")
-    print(f"Auto-Calibration: {AUTO_CALIBRATE}")
+    if INPUT_MODE.upper() == 'MANUAL':
+        print(f"Manual Gain Factor: {MANUAL_GAIN_FACTOR}x")
+        print(f"  → All measurements will be multiplied by {MANUAL_GAIN_FACTOR}x")
+    elif INPUT_MODE.upper() == 'AUTO':
+        print(f"Auto-Calibration: {AUTO_CALIBRATE}")
     print(f"Save Timestamps: {SAVE_TIMESTAMPS}")
     print("=" * 60)
-    print("Expected for direct OUT1→IN1 connection (after calibration):")
-    print(f"  X = {REF_AMPLITUDE / 2:.3f} V (in-phase)")
-    print("  Y = 0.000 V (quadrature)")
-    print(f"  R = {REF_AMPLITUDE / 2:.3f} V (magnitude)")
+
+    if INPUT_MODE.upper() == 'MANUAL':
+        print(f"Expected for direct OUT1→IN1 connection (with {MANUAL_GAIN_FACTOR}x gain):")
+        print(f"  X = {(REF_AMPLITUDE / 2) * MANUAL_GAIN_FACTOR:.3f} V (in-phase)")
+        print("  Y = 0.000 V (quadrature)")
+        print(f"  R = {(REF_AMPLITUDE / 2) * MANUAL_GAIN_FACTOR:.3f} V (magnitude)")
+    else:
+        print("Expected for direct OUT1→IN1 connection (after calibration):")
+        print(f"  X = {REF_AMPLITUDE / 2:.3f} V (in-phase)")
+        print("  Y = 0.000 V (quadrature)")
+        print(f"  R = {REF_AMPLITUDE / 2:.3f} V (magnitude)")
+
     print("  Theta = 0.000 rad (phase)")
     print("  FFT peak at 0 Hz")
     print("=" * 60)
 
-    if INPUT_MODE.upper() == 'AUTO' and AUTO_CALIBRATE:
+    if INPUT_MODE.upper() == 'MANUAL':
+        print(f"\nNOTE: Manual gain mode enabled - using {MANUAL_GAIN_FACTOR}x correction factor")
+        print("      No auto-calibration will be performed")
+    elif INPUT_MODE.upper() == 'AUTO' and AUTO_CALIBRATE:
         print("\nNOTE: Auto-calibration will detect LV/HV mode and correct all measurements")
     elif INPUT_MODE.upper() == 'LV':
         print("\nNOTE: Input mode manually set to LV (±1V range)")
@@ -646,4 +686,4 @@ if __name__ == '__main__':
         print("      Make sure your Red Pitaya jumpers are set to HV!")
     print("=" * 60)
 
-    rp.run(run_params) 
+    rp.run(run_params)
