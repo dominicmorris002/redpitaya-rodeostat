@@ -218,18 +218,35 @@ class RedPitaya:
         while (time.time() - loop_start) < params['timeout']:
             self.capture_lockin()
 
+        acquisition_end_time = time.time()
+
         # Concatenate and apply gain correction
         all_X = np.concatenate(self.lockin_X) * self.input_gain_factor
         all_Y = np.concatenate(self.lockin_Y) * self.input_gain_factor
 
-        # Generate timestamps for each sample
+        # Calculate ACTUAL sampling rate
         total_samples = len(all_X)
+        actual_duration = acquisition_end_time - self.acquisition_start_time
+        actual_sample_rate = total_samples / actual_duration
+        sample_rate_error = (actual_sample_rate - self.sample_rate) / self.sample_rate * 100
+
+        print("\n" + "=" * 60)
+        print("SAMPLING RATE ANALYSIS")
+        print("=" * 60)
+        print(f"Nominal sample rate: {self.sample_rate:.2f} Hz")
+        print(f"Actual sample rate: {actual_sample_rate:.2f} Hz")
+        print(f"Sample rate error: {sample_rate_error:.4f}%")
+        print(f"Total samples: {total_samples}")
+        print(f"Actual duration: {actual_duration:.3f}s")
+        print("=" * 60)
+
+        # Generate timestamps for each sample
         sample_timestamps = np.zeros(total_samples)
         sample_idx = 0
 
         for i, capture_time in enumerate(self.capture_timestamps):
             n_samples = len(self.lockin_X[i])
-            capture_duration = n_samples / self.sample_rate
+            capture_duration = n_samples / actual_sample_rate  # Use actual rate
             sample_times = np.linspace(0, capture_duration, n_samples, endpoint=False)
             sample_timestamps[sample_idx:sample_idx + n_samples] = capture_time + sample_times
             sample_idx += n_samples
@@ -253,19 +270,19 @@ class RedPitaya:
         self.scope.single()
         out1_raw = np.array(self.scope._data_ch1_current)
         in1_raw = np.array(self.scope._data_ch2_current) * self.input_gain_factor
-        t_raw = np.arange(len(out1_raw)) / self.sample_rate
+        t_raw = np.arange(len(out1_raw)) / actual_sample_rate  # Use actual rate
 
         self.scope.input1 = 'iq2'
         self.scope.input2 = 'iq2_2'
 
-        # FFT analysis
+        # FFT analysis using actual sample rate
         iq = all_X + 1j * all_Y
         n_pts = len(iq)
         win = np.hanning(n_pts)
         IQwin = iq * win
         IQfft = np.fft.fftshift(np.fft.fft(IQwin))
-        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / self.sample_rate))
-        psd_lock = (np.abs(IQfft) ** 2) / (self.sample_rate * np.sum(win ** 2))
+        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / actual_sample_rate))  # Use actual rate
+        psd_lock = (np.abs(IQfft) ** 2) / (actual_sample_rate * np.sum(win ** 2))  # Use actual rate
         idx = np.argmax(psd_lock)
 
         # Print diagnostics
@@ -301,7 +318,7 @@ class RedPitaya:
         # Reference signal
         ax1 = plt.subplot(3, 3, 1)
         n_periods = 5
-        n_plot = min(int(n_periods * self.sample_rate / self.ref_freq), len(out1_raw))
+        n_plot = min(int(n_periods * actual_sample_rate / self.ref_freq), len(out1_raw))
         ax1.plot(t_raw[:n_plot] * 1000, out1_raw[:n_plot], 'b-', linewidth=1)
         ax1.set_xlabel('Time (ms)')
         ax1.set_ylabel('OUT1 (V)')
@@ -419,6 +436,8 @@ class RedPitaya:
                     f.write(f"# Gain: {self.input_gain_factor:.6f}\n")
                     f.write(f"# Ref Freq: {self.ref_freq} Hz\n")
                     f.write(f"# Ref Amp: {params['ref_amp']} V\n")
+                    f.write(f"# Nominal Sample Rate: {self.sample_rate:.2f} Hz\n")
+                    f.write(f"# Actual Sample Rate: {actual_sample_rate:.2f} Hz\n")
                     f.write("AbsoluteTimestamp,RelativeTime,R,Theta,X,Y\n")
                     np.savetxt(f, data, delimiter=",", fmt='%.10f')
 
