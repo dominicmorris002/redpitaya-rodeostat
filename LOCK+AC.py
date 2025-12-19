@@ -1,165 +1,96 @@
 """
-Red Pitaya Lock-In Amplifier - WITH AUTO-CALIBRATION & MANUAL GAIN & TIMESTAMP SYNC
+Red Pitaya Lock-In Amplifier with Auto-Calibration
 
-SETUP: Connect OUT1 directly to IN1 with a cable
-
-This version supports three input mode options:
-1. 'AUTO' - Automatically calibrates and detects LV/HV mode
-2. 'LV' or 'HV' - Uses theoretical gain (1.0x or 20.0x)
-3. 'MANUAL' - Uses your custom gain factor directly
-
-NEW FEATURES:
-- Manual gain mode: Set INPUT_MODE = 'MANUAL' and MANUAL_GAIN_FACTOR = 27 for 27x correction
-- Auto-calibration: Measures actual input gain and compensates
-- Input mode detection: Shows if in LV (±1V) or HV (±20V) mode
-- Corrected measurements: All values adjusted for actual hardware gain
-
-IQ MODULE OUTPUTS:
-- For iq2 module: iq2 = X (in-phase), iq2_2 = Y (quadrature)
+Connect OUT1 to IN1 with a cable for testing.
+Supports AUTO, LV, HV, or MANUAL gain modes.
 """
 
 from datetime import datetime
 import time
+import math
+import numpy as np
+from matplotlib import pyplot as plt
+import csv
+import os
+from pyrpl import Pyrpl
+
+# ============================================================
+# MEASUREMENT PARAMETERS
+# ============================================================
+REF_FREQUENCY = 500  # Hz
+REF_AMPLITUDE = 1  # V
+OUTPUT_CHANNEL = 'out1'
+PHASE_OFFSET = 0  # degrees
+MEASUREMENT_TIME = 30.0  # seconds
+
+# INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
+INPUT_MODE = 'Manual'
+MANUAL_GAIN_FACTOR = 27.80999388  # Only used if INPUT_MODE = 'MANUAL'
+
+FILTER_BANDWIDTH = 10  # Hz
+AVERAGING_WINDOW = 1  # samples
+DECIMATION = 8192
+
+SAVE_DATA = True
+OUTPUT_DIRECTORY = 'test_data'
+SAVE_TIMESTAMPS = True
+
+AUTO_CALIBRATE = True  # Only used if INPUT_MODE = 'AUTO'
+CALIBRATION_TIME = 2.0  # seconds
+# ============================================================
 
 START_TIME_FILE = "start_time.txt"
 
 with open(START_TIME_FILE, "r") as f:
     START_TIME = datetime.fromisoformat(f.read().strip())
 
-# Wait until start time
 while datetime.now() < START_TIME:
-    time.sleep(0.001)  # 1 ms resolution
-
-# ============================================================
-# MEASUREMENT PARAMETERS - CHANGE THESE
-# ============================================================
-REF_FREQUENCY = 500  # Hz - AC excitation frequency
-REF_AMPLITUDE = 1  # V - AC signal amplitude (will appear on OUT1)
-OUTPUT_CHANNEL = 'out1'  # 'out1' or 'out2' - where to send AC signal
-PHASE_OFFSET = 0  # degrees - phase adjustment (0, 90, 180, 270)
-MEASUREMENT_TIME = 30.0  # seconds - how long to measure
-
-# INPUT MODE CONFIGURATION
-# Set the input voltage range and gain correction method
-# Options:
-#   'AUTO' - Auto-calibrate and detect LV/HV mode (recommended for first use)
-#   'LV'   - Low Voltage mode (±1V), uses 1.0x gain
-#   'HV'   - High Voltage mode (±20V), uses 20.0x theoretical gain
-#   'MANUAL' - Use custom gain factor (see MANUAL_GAIN_FACTOR below)
-INPUT_MODE = 'Manual'
-
-# MANUAL GAIN FACTOR (only used when INPUT_MODE = 'MANUAL')
-# If you know your system needs a specific gain correction, set it here
-# Examples:
-#   MANUAL_GAIN_FACTOR = 1.0   -> No correction
-#   MANUAL_GAIN_FACTOR = 27    -> 27x gain correction
-#   MANUAL_GAIN_FACTOR = 0.5   -> 0.5x gain correction (signal amplification)
-# This will multiply all measured voltages by this factor
-MANUAL_GAIN_FACTOR = 27.80999388
-
-# LOCK-IN FILTER BANDWIDTH
-FILTER_BANDWIDTH = 10  # Hz - lower = cleaner, higher = faster response
-
-# AVERAGING
-AVERAGING_WINDOW = 1  # samples - set to 1 to see raw lock-in output first
-
-# Data saving
-SAVE_DATA = True  # True = save to files, False = just show plots
-OUTPUT_DIRECTORY = 'test_data'
-
-# Advanced settings
-DECIMATION = 8192
-SHOW_FFT = True
-
-# Calibration settings (only used if INPUT_MODE = 'AUTO')
-AUTO_CALIBRATE = True  # Auto-detect input attenuation and compensate
-CALIBRATION_TIME = 2.0  # seconds - how long to measure for calibration
-
-# Synchronization settings
-SAVE_TIMESTAMPS = True  # Save absolute timestamps for sync with NI-DAQ
-# ============================================================
-
-import math
-from pyrpl import Pyrpl
-import numpy as np
-from matplotlib import pyplot as plt
-import time
-import csv
-import os
-from datetime import datetime
-
-N_FFT_SHOW = 10
+    time.sleep(0.001)
 
 
 class RedPitaya:
-    electrode_map = {'A': (False, False), 'B': (True, False),
-                     'C': (False, True), 'D': (True, True)}
-    current_range_map = {'10uA': (False, True, True, True),
-                         '100uA': (True, False, True, True),
-                         '1mA': (True, True, False, True),
-                         '10mA': (True, True, True, False)}
-    dac_gain_map = {'1X': (False, False), '5X': (False, True),
-                    '2X': (True, False), '10X': (True, True)}
-    current_scaling_map = {'10mA': 65, '1mA': 600, '100uA': 6000, '10uA': 60000}
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
     def __init__(self, output_dir='test_data', input_mode='AUTO', manual_gain=1.0):
         self.rp = Pyrpl(config='lockin_config', hostname='rp-f073ce.local')
-
         self.output_dir = output_dir
         self.rp_modules = self.rp.rp
         self.lockin = self.rp_modules.iq2
         self.ref_sig = self.rp_modules.asg0
-        self.ref_start_t = 0.0
+        self.scope = self.rp_modules.scope
+        self.pid = self.rp_modules.pid0
+        
         self.lockin_X = []
-        self.all_X = []
         self.lockin_Y = []
-        self.all_Y = []
-
-        # Store capture timestamps
         self.capture_timestamps = []
         self.acquisition_start_time = None
 
-        # Calibration and input mode settings
-        self.input_gain_factor = manual_gain  # Default to manual gain
-        self.input_mode_setting = input_mode.upper()  # 'LV', 'HV', 'AUTO', or 'MANUAL'
-        self.input_mode = "Unknown"  # Detected mode (will be set during calibration or init)
+        # Setup input gain
+        self.input_gain_factor = manual_gain
+        self.input_mode_setting = input_mode.upper()
+        self.input_mode = "Unknown"
 
-        # Set expected gain based on mode if not AUTO
         if self.input_mode_setting == 'MANUAL':
             self.input_gain_factor = manual_gain
-            self.input_mode = f"MANUAL - {manual_gain}x gain"
-            print(f"⚙ Input mode set to: {self.input_mode}")
-            print(f"   All measurements will be multiplied by {manual_gain}x")
+            self.input_mode = f"MANUAL ({manual_gain}x gain)"
+            print(f"Input mode: {self.input_mode}")
         elif self.input_mode_setting == 'LV':
             self.input_gain_factor = 1.0
-            self.input_mode = "LV (±1V) - Manual"
-            print(f"⚙ Input mode set to: {self.input_mode}")
+            self.input_mode = "LV (±1V)"
+            print(f"Input mode: {self.input_mode}")
         elif self.input_mode_setting == 'HV':
-            self.input_gain_factor = 20.0  # Theoretical 20:1 divider
-            self.input_mode = "HV (±20V) - Manual (20:1 divider)"
-            print(f"⚙ Input mode set to: {self.input_mode}")
+            self.input_gain_factor = 20.0
+            self.input_mode = "HV (±20V, 20:1 divider)"
+            print(f"Input mode: {self.input_mode}")
         elif self.input_mode_setting == 'AUTO':
-            self.input_mode = "AUTO - Will calibrate"
-            print(f"⚙ Input mode set to: AUTO (will auto-detect)")
-        else:
-            print(f"⚠ Warning: Unknown input mode '{input_mode}', defaulting to AUTO")
-            self.input_mode_setting = 'AUTO'
-            self.input_mode = "AUTO - Will calibrate"
+            self.input_mode = "AUTO (will calibrate)"
+            print("Input mode: AUTO - will auto-detect")
 
-        self.pid = self.rp_modules.pid0
-        self.kp = self.pid.p
-        self.ki = self.pid.i
-        self.ival = self.pid.ival
-        self.scope = self.rp_modules.scope
-
-        print("Available scope inputs:", self.scope.inputs)
-
-        # For iq2 module, use iq2 (X) and iq2_2 (Y)
+        # Setup scope
         self.scope.input1 = 'iq2'  # X (in-phase)
         self.scope.input2 = 'iq2_2'  # Y (quadrature)
         self.scope.decimation = DECIMATION
-
+        
         if self.scope.decimation not in self.allowed_decimations:
             print('Invalid decimation')
             exit()
@@ -169,26 +100,16 @@ class RedPitaya:
         self.sample_rate = 125e6 / self.scope.decimation
 
     def calibrate_input_gain(self, cal_freq=100, cal_amp=1.0, cal_time=2.0, force=False):
-        """
-        Calibrate input gain by generating known signal and measuring response.
-        This detects if we're in LV (±1V) or HV (±20V) mode.
-
-        Args:
-            force: If True, always calibrate. If False, skip if mode is manually set.
-        """
-        # Skip calibration if mode is manually set (unless forced)
+        """Measure actual input gain to detect LV/HV mode"""
         if not force and self.input_mode_setting != 'AUTO':
-            print(f"\n⚙ Skipping calibration - using manual mode: {self.input_mode}")
-            print(f"   Gain factor: {self.input_gain_factor:.4f}x")
+            print(f"Skipping calibration - using {self.input_mode}")
             return self.input_gain_factor
 
         print("\n" + "=" * 60)
         print("CALIBRATING INPUT GAIN...")
         print("=" * 60)
 
-        # Setup lock-in with known parameters
         self.ref_sig.output_direct = 'off'
-
         self.lockin.setup(
             frequency=cal_freq,
             bandwidth=10,
@@ -201,17 +122,13 @@ class RedPitaya:
             output_signal='quadrature',
             quadrature_factor=1.0)
 
-        print(f"Generating {cal_amp}V sine at {cal_freq} Hz on OUT1")
-        print(f"Measuring response on IN1 for {cal_time} seconds...")
-
-        # Let it settle
+        print(f"Generating {cal_amp}V at {cal_freq} Hz, measuring for {cal_time}s...")
         time.sleep(0.5)
 
-        # Collect calibration data
         cal_X = []
         cal_Y = []
-
         start_time = time.time()
+        
         while (time.time() - start_time) < cal_time:
             self.scope.single()
             ch1 = np.array(self.scope._data_ch1_current)
@@ -219,46 +136,27 @@ class RedPitaya:
             cal_X.append(ch1)
             cal_Y.append(ch2)
 
-        # Calculate measured amplitude
         all_cal_X = np.concatenate(cal_X)
         all_cal_Y = np.concatenate(cal_Y)
-
         cal_R = np.sqrt(all_cal_X ** 2 + all_cal_Y ** 2)
         measured_amp = np.mean(cal_R)
-
-        # Expected amplitude is half of the output amplitude (lock-in measures RMS-like)
         expected_amp = cal_amp / 2.0
-
-        # Calculate gain factor
+        
         self.input_gain_factor = expected_amp / measured_amp
 
-        # Determine input mode based on attenuation
         if self.input_gain_factor < 1.05:
-            self.input_mode = "LV (±1V) - Direct"
-            mode_detail = "Jumpers set to Low Voltage mode (no divider)"
-        elif 1.05 <= self.input_gain_factor < 1.15:
-            self.input_mode = "LV (±1V) - with loading"
-            mode_detail = "Jumpers in LV mode with minor impedance loading (~8%)"
-        elif 1.15 <= self.input_gain_factor < 15:
-            attenuation_ratio = 1.0 / self.input_gain_factor
-            self.input_mode = f"Unknown attenuation - {attenuation_ratio:.2f}:1"
-            mode_detail = f"Unexpected attenuation detected (gain factor {self.input_gain_factor:.2f}x)"
+            self.input_mode = "LV (±1V)"
+        elif self.input_gain_factor < 1.15:
+            self.input_mode = "LV (±1V) with loading"
+        elif self.input_gain_factor < 15:
+            self.input_mode = f"Unknown ({self.input_gain_factor:.2f}x)"
         else:
-            # Significant attenuation suggests HV mode voltage divider
-            attenuation_ratio = 1.0 / self.input_gain_factor
-            self.input_mode = f"HV (±20V) - {attenuation_ratio:.1f}:1 divider"
-            mode_detail = "Jumpers set to High Voltage mode with 20:1 voltage divider"
+            attenuation = 1.0 / self.input_gain_factor
+            self.input_mode = f"HV (±20V, {attenuation:.1f}:1)"
 
-        print("-" * 60)
-        print("CALIBRATION RESULTS:")
-        print(f"  Output amplitude: {cal_amp:.3f} V")
-        print(f"  Expected measured: {expected_amp:.3f} V")
-        print(f"  Actually measured: {measured_amp:.3f} V")
-        print(f"  Input gain factor: {self.input_gain_factor:.4f}x")
-        print(f"  Input mode: {self.input_mode}")
-        print(f"  Details: {mode_detail}")
-        print("-" * 60)
-        print("✓ All measurements will be corrected using this gain factor")
+        print(f"Output: {cal_amp:.3f}V, Expected: {expected_amp:.3f}V, Measured: {measured_amp:.3f}V")
+        print(f"Gain factor: {self.input_gain_factor:.4f}x")
+        print(f"Mode: {self.input_mode}")
         print("=" * 60 + "\n")
 
         return self.input_gain_factor
@@ -270,11 +168,8 @@ class RedPitaya:
         filter_bw = params.get('filter_bandwidth', 10)
         phase_setting = params.get('phase', 0)
 
-        # Turn OFF ASG0 - IQ module generates reference
         self.ref_sig.output_direct = 'off'
-        print("ASG0 disabled - IQ module will generate reference")
-
-        # IQ MODULE: generates, outputs, and demodulates
+        
         self.lockin.setup(
             frequency=self.ref_freq,
             bandwidth=filter_bw,
@@ -287,22 +182,17 @@ class RedPitaya:
             output_signal='quadrature',
             quadrature_factor=1.0)
 
-        print(f"Lock-in setup: {self.ref_freq} Hz, Amplitude: {ref_amp}V")
-        print(f"Filter BW: {filter_bw} Hz")
-        print(f"IQ2 output_direct: {self.lockin.output_direct} (outputs {ref_amp}V sine)")
-        print(f"IQ2 amplitude: {self.lockin.amplitude} V")
-        print(f"IQ2 input: {self.lockin.input}")
-        print(f"Scope reading: iq2 (X) and iq2_2 (Y)")
+        print(f"Lock-in: {self.ref_freq} Hz, {ref_amp}V, BW: {filter_bw} Hz")
         print(f"Gain correction: {self.input_gain_factor:.4f}x")
 
     def capture_lockin(self):
-        """Captures scope data and appends to X and Y arrays with timestamps"""
+        """Capture scope data and store with timestamp"""
         capture_time = time.time()
-
         self.scope.single()
+        
         ch1 = np.array(self.scope._data_ch1_current)
         ch2 = np.array(self.scope._data_ch2_current)
-
+        
         self.lockin_X.append(ch1)
         self.lockin_Y.append(ch2)
         self.capture_timestamps.append(capture_time)
@@ -310,82 +200,66 @@ class RedPitaya:
         return ch1, ch2
 
     def run(self, params):
-        # Calibrate input gain if requested
         if params.get('auto_calibrate', False):
-            cal_time = params.get('calibration_time', 2.0)
             self.calibrate_input_gain(
                 cal_freq=params['ref_freq'],
                 cal_amp=params['ref_amp'],
-                cal_time=cal_time
+                cal_time=params.get('calibration_time', 2.0)
             )
 
-        timeout = params['timeout']
         self.setup_lockin(params)
-
-        # Let the lock-in settle
-        print("Waiting for lock-in to settle...")
+        print("Settling...")
         time.sleep(0.5)
 
-        # Record absolute start time
         self.acquisition_start_time = time.time()
-        print(
-            f"\n✓ Acquisition started at: {datetime.fromtimestamp(self.acquisition_start_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
+        print(f"Started: {datetime.fromtimestamp(self.acquisition_start_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
 
         loop_start = time.time()
-        while (time.time() - loop_start) < timeout:
+        while (time.time() - loop_start) < params['timeout']:
             self.capture_lockin()
 
-        self.all_X = np.array(np.concatenate(self.lockin_X))
-        self.all_Y = np.array(np.concatenate(self.lockin_Y))
+        # Concatenate and apply gain correction
+        all_X = np.concatenate(self.lockin_X) * self.input_gain_factor
+        all_Y = np.concatenate(self.lockin_Y) * self.input_gain_factor
 
-        # Apply gain correction
-        self.all_X *= self.input_gain_factor
-        self.all_Y *= self.input_gain_factor
-
-        # Generate per-sample timestamps
-        samples_per_capture = len(self.lockin_X[0])
-        total_samples = len(self.all_X)
-
-        self.sample_timestamps = np.zeros(total_samples)
+        # Generate timestamps for each sample
+        total_samples = len(all_X)
+        sample_timestamps = np.zeros(total_samples)
         sample_idx = 0
 
         for i, capture_time in enumerate(self.capture_timestamps):
             n_samples = len(self.lockin_X[i])
             capture_duration = n_samples / self.sample_rate
             sample_times = np.linspace(0, capture_duration, n_samples, endpoint=False)
-            self.sample_timestamps[sample_idx:sample_idx + n_samples] = capture_time + sample_times
+            sample_timestamps[sample_idx:sample_idx + n_samples] = capture_time + sample_times
             sample_idx += n_samples
 
-        # Apply moving average filter
+        # Apply averaging filter
         averaging_window = params.get('averaging_window', 1)
-
         if averaging_window > 1:
-            self.all_X = np.convolve(self.all_X, np.ones(averaging_window) / averaging_window, mode='valid')
-            self.all_Y = np.convolve(self.all_Y, np.ones(averaging_window) / averaging_window, mode='valid')
-            self.sample_timestamps = self.sample_timestamps[:len(self.all_X)]
-            print(f"Applied {averaging_window}-sample moving average filter")
+            all_X = np.convolve(all_X, np.ones(averaging_window) / averaging_window, mode='valid')
+            all_Y = np.convolve(all_Y, np.ones(averaging_window) / averaging_window, mode='valid')
+            sample_timestamps = sample_timestamps[:len(all_X)]
+            print(f"Applied {averaging_window}-sample moving average")
 
-        R = np.sqrt(self.all_X ** 2 + self.all_Y ** 2)
-        Theta = np.arctan2(self.all_Y, self.all_X)
+        R = np.sqrt(all_X ** 2 + all_Y ** 2)
+        Theta = np.arctan2(all_Y, all_X)
+        t = sample_timestamps - self.acquisition_start_time
 
-        # Time array (relative to start)
-        t = self.sample_timestamps - self.acquisition_start_time
-
-        # Capture raw signals for plotting
+        # Get raw signals for plotting
         self.scope.input1 = 'out1'
         self.scope.input2 = 'in1'
         time.sleep(0.05)
         self.scope.single()
         out1_raw = np.array(self.scope._data_ch1_current)
-        in1_raw = np.array(self.scope._data_ch2_current) * self.input_gain_factor  # Corrected
+        in1_raw = np.array(self.scope._data_ch2_current) * self.input_gain_factor
         t_raw = np.arange(len(out1_raw)) / self.sample_rate
 
-        # Switch back to lock-in outputs
         self.scope.input1 = 'iq2'
         self.scope.input2 = 'iq2_2'
 
-        # FFT calculations
-        iq = self.all_X + 1j * self.all_Y
+        # FFT analysis
+        iq = all_X + 1j * all_Y
         n_pts = len(iq)
         win = np.hanning(n_pts)
         IQwin = iq * win
@@ -394,179 +268,135 @@ class RedPitaya:
         psd_lock = (np.abs(IQfft) ** 2) / (self.sample_rate * np.sum(win ** 2))
         idx = np.argmax(psd_lock)
 
+        # Print diagnostics
+        print("\n" + "=" * 60)
+        print("RESULTS (GAIN-CORRECTED)")
         print("=" * 60)
-        print("LOCK-IN DIAGNOSTICS (GAIN-CORRECTED)")
-        print("=" * 60)
-        print(f"Input Mode: {self.input_mode}")
-        print(f"Gain Correction Factor: {self.input_gain_factor:.4f}x")
-        print("-" * 60)
-        print(f"Reference Frequency Set: {self.ref_freq} Hz")
-        print(f"FFT Peak Found at: {freqs_lock[idx]:.2f} Hz")
-        print(f"Peak Offset from 0 Hz: {abs(freqs_lock[idx]):.2f} Hz")
-
+        print(f"Mode: {self.input_mode}")
+        print(f"Gain: {self.input_gain_factor:.4f}x")
+        print(f"FFT peak: {freqs_lock[idx]:.2f} Hz (should be ~0 Hz)")
+        
         if abs(freqs_lock[idx]) < 5:
-            print("✓ Lock-in is LOCKED (peak near 0 Hz)")
+            print("✓ Lock-in is LOCKED")
         else:
-            print("✗ WARNING: Lock-in NOT locked! Peak should be at 0 Hz!")
+            print("✗ WARNING: Not locked! Peak should be at 0 Hz")
 
-        print(f"Sample Rate: {self.sample_rate:.2f} Hz")
-        print(f"Total Samples: {len(self.all_X)}")
-        print(f"Measurement Duration: {t[-1]:.3f} seconds")
-
-        print("-" * 60)
-        print("TIMESTAMP INFORMATION:")
-        print(f"Start time: {datetime.fromtimestamp(self.sample_timestamps[0]).strftime('%Y-%m-%d %H:%M:%S.%f')}")
-        print(f"End time:   {datetime.fromtimestamp(self.sample_timestamps[-1]).strftime('%Y-%m-%d %H:%M:%S.%f')}")
-        print(f"Duration:   {self.sample_timestamps[-1] - self.sample_timestamps[0]:.3f} seconds")
-
-        print("-" * 60)
-        print(f"Mean R: {np.mean(R):.6f} V ± {np.std(R):.6f} V")
-        print(f"SNR (R): {np.mean(R) / (np.std(R) + 1e-9):.2f} (mean/std)")
-        print(f"R range: [{np.min(R):.6f}, {np.max(R):.6f}] V")
-
+        print(f"Samples: {len(all_X)}, Duration: {t[-1]:.3f}s")
+        print(f"Mean R: {np.mean(R):.6f} ± {np.std(R):.6f} V")
+        print(f"Mean X: {np.mean(all_X):.6f} ± {np.std(all_X):.6f} V")
+        print(f"Mean Y: {np.mean(all_Y):.6f} ± {np.std(all_Y):.6f} V")
+        print(f"Mean Theta: {np.mean(Theta):.6f} ± {np.std(Theta):.6f} rad")
+        
         expected_R = params['ref_amp'] / 2
         if abs(np.mean(R) - expected_R) < 0.05:
-            print(f"✓ R matches expected {expected_R:.3f}V (corrected)")
+            print(f"✓ R matches expected {expected_R:.3f}V")
         else:
-            print(f"✗ R differs from expected {expected_R:.3f}V")
-            print(f"  Difference: {abs(np.mean(R) - expected_R):.3f}V")
-
-        print("-" * 60)
-        print(f"Mean X: {np.mean(self.all_X):.6f} V ± {np.std(self.all_X):.6f} V")
-        print(f"Mean Y: {np.mean(self.all_Y):.6f} V ± {np.std(self.all_Y):.6f} V")
-        print(f"Mean Theta: {np.mean(Theta):.6f} rad ± {np.std(Theta):.6f} rad")
-        print(f"Theta range: [{np.min(Theta):.6f}, {np.max(Theta):.6f}] rad")
-        print(f"Phase stability: {np.std(Theta):.3f} rad (lower is better)")
-
-        X_ac = np.std(self.all_X)
-        Y_ac = np.std(self.all_Y)
-        X_dc = np.mean(np.abs(self.all_X))
-        Y_dc = np.mean(np.abs(self.all_Y))
-
-        print("-" * 60)
-        print("Signal characteristics:")
-        print(f"X: DC={X_dc:.6f}V, AC={X_ac:.6f}V, AC/DC={X_ac / max(X_dc, 0.001):.3f}")
-        print(f"Y: DC={Y_dc:.6f}V, AC={Y_ac:.6f}V, AC/DC={Y_ac / max(Y_dc, 0.001):.3f}")
-
-        SIGNAL_THRESHOLD = 0.02
-
-        if X_dc > SIGNAL_THRESHOLD and X_ac / X_dc > 0.5:
-            print("⚠ WARNING: X is oscillating! Should be flat for locked signal")
-
-        if Y_dc > SIGNAL_THRESHOLD and Y_ac / Y_dc > 0.5:
-            print("⚠ WARNING: Y is oscillating! Should be flat for locked signal")
-
+            print(f"✗ R differs from expected {expected_R:.3f}V by {abs(np.mean(R) - expected_R):.3f}V")
+        
         print("=" * 60)
 
-        # Create comprehensive plot
+        # Create plots
         fig = plt.figure(figsize=(16, 10))
-        ZoomOut_Amount = 5
 
-        # 1. OUT1 (Reference Signal)
+        # Reference signal
         ax1 = plt.subplot(3, 3, 1)
         n_periods = 5
-        n_samples_plot = int(n_periods * self.sample_rate / self.ref_freq)
-        n_samples_plot = min(n_samples_plot, len(out1_raw))
-        ax1.plot(t_raw[:n_samples_plot] * 1000, out1_raw[:n_samples_plot], 'b-', linewidth=1)
+        n_plot = min(int(n_periods * self.sample_rate / self.ref_freq), len(out1_raw))
+        ax1.plot(t_raw[:n_plot] * 1000, out1_raw[:n_plot], 'b-', linewidth=1)
         ax1.set_xlabel('Time (ms)')
         ax1.set_ylabel('OUT1 (V)')
-        ax1.set_title(f'Reference Signal (OUT1) @ {self.ref_freq} Hz')
+        ax1.set_title(f'Reference @ {self.ref_freq} Hz')
         ax1.grid(True)
 
-        # 2. IN1 (Input Signal - CORRECTED)
+        # Input signal
         ax2 = plt.subplot(3, 3, 2)
-        ax2.plot(t_raw[:n_samples_plot] * 1000, in1_raw[:n_samples_plot], 'r-', linewidth=1)
+        ax2.plot(t_raw[:n_plot] * 1000, in1_raw[:n_plot], 'r-', linewidth=1)
         ax2.set_xlabel('Time (ms)')
-        ax2.set_ylabel('IN1 (V, corrected)')
-        ax2.set_title(f'Input Signal (IN1) - {self.input_mode}')
+        ax2.set_ylabel('IN1 (V)')
+        ax2.set_title(f'Input - {self.input_mode}')
         ax2.grid(True)
 
-        # 3. FFT Spectrum
+        # FFT
         ax3 = plt.subplot(3, 3, 3)
         ax3.semilogy(freqs_lock, psd_lock, label='Lock-in PSD')
-        ax3.axvline(0, color='r', linestyle='--', alpha=0.5, label='0 Hz (target)')
+        ax3.axvline(0, color='r', linestyle='--', alpha=0.5, label='0 Hz')
         ax3.set_xlabel('Frequency (Hz)')
-        ax3.set_ylabel('Power (a.u.)')
-        ax3.set_title('FFT Spectrum (baseband)')
+        ax3.set_ylabel('Power')
+        ax3.set_title('FFT Spectrum')
         ax3.legend()
         ax3.grid(True)
 
-        # 4. X vs Time
+        # X vs Time
         ax4 = plt.subplot(3, 3, 4)
-        ax4.plot(t, self.all_X, 'b-', linewidth=0.5)
-        ax4.axhline(np.mean(self.all_X), color='r', linestyle='--', alpha=0.7,
-                    label=f'Mean: {np.mean(self.all_X):.4f}V')
+        ax4.plot(t, all_X, 'b-', linewidth=0.5)
+        ax4.axhline(np.mean(all_X), color='r', linestyle='--', label=f'Mean: {np.mean(all_X):.4f}V')
         ax4.set_xlabel('Time (s)')
-        ax4.set_ylabel('X (V, corrected)')
-        ax4.set_title('In-phase (X) vs Time [iq2] - Corrected')
+        ax4.set_ylabel('X (V)')
+        ax4.set_title('In-phase (X)')
         ax4.legend()
         ax4.grid(True)
         ax4.set_xlim(t[0], t[-1])
-        margin_X = ZoomOut_Amount * (np.max(self.all_X) - np.min(self.all_X))
-        ax4.set_ylim(np.min(self.all_X) - margin_X, np.max(self.all_X) + margin_X)
+        margin_X = 5 * (np.max(all_X) - np.min(all_X))
+        ax4.set_ylim(np.min(all_X) - margin_X, np.max(all_X) + margin_X)
 
-        # 5. Y vs Time
+        # Y vs Time
         ax5 = plt.subplot(3, 3, 5)
-        ax5.plot(t, self.all_Y, 'r-', linewidth=0.5)
-        ax5.axhline(np.mean(self.all_Y), color='b', linestyle='--', alpha=0.7,
-                    label=f'Mean: {np.mean(self.all_Y):.4f}V')
+        ax5.plot(t, all_Y, 'r-', linewidth=0.5)
+        ax5.axhline(np.mean(all_Y), color='b', linestyle='--', label=f'Mean: {np.mean(all_Y):.4f}V')
         ax5.set_xlabel('Time (s)')
-        ax5.set_ylabel('Y (V, corrected)')
-        ax5.set_title('Quadrature (Y) vs Time [iq2_2] - Corrected')
+        ax5.set_ylabel('Y (V)')
+        ax5.set_title('Quadrature (Y)')
         ax5.legend()
         ax5.grid(True)
         ax5.set_xlim(t[0], t[-1])
-        margin_Y = ZoomOut_Amount * (np.max(self.all_Y) - np.min(self.all_Y))
-        ax5.set_ylim(np.min(self.all_Y) - margin_Y, np.max(self.all_Y) + margin_Y)
+        margin_Y = 5 * (np.max(all_Y) - np.min(all_Y))
+        ax5.set_ylim(np.min(all_Y) - margin_Y, np.max(all_Y) + margin_Y)
 
-        # 6. X vs Y (IQ plot)
+        # IQ plot (with corrected gain)
         ax6 = plt.subplot(3, 3, 6)
-        ax6.plot(self.all_X, self.all_Y, 'g.', markersize=1, alpha=0.5)
-        ax6.plot(np.mean(self.all_X), np.mean(self.all_Y), 'r+', markersize=15,
-                 markeredgewidth=2, label='Mean')
-        ax6.set_xlabel('X (V, corrected)')
-        ax6.set_ylabel('Y (V, corrected)')
-        ax6.set_title('IQ Plot (X vs Y) - Corrected')
+        ax6.plot(all_X, all_Y, 'g.', markersize=1, alpha=0.5)
+        ax6.plot(np.mean(all_X), np.mean(all_Y), 'r+', markersize=15, markeredgewidth=2, label='Mean')
+        ax6.set_xlabel('X (V)')
+        ax6.set_ylabel('Y (V)')
+        ax6.set_title('IQ Plot')
         ax6.legend()
         ax6.grid(True)
         ax6.axis('equal')
 
-        # 7. R vs Time
+        # R vs Time
         ax7 = plt.subplot(3, 3, 7)
         ax7.plot(t, R, 'm-', linewidth=0.5)
-        ax7.axhline(np.mean(R), color='b', linestyle='--', alpha=0.7,
-                    label=f'Mean: {np.mean(R):.4f}V')
+        ax7.axhline(np.mean(R), color='b', linestyle='--', label=f'Mean: {np.mean(R):.4f}V')
         ax7.set_xlabel('Time (s)')
-        ax7.set_ylabel('R (V, corrected)')
-        ax7.set_title('Magnitude (R) vs Time - Corrected')
+        ax7.set_ylabel('R (V)')
+        ax7.set_title('Magnitude (R)')
         ax7.legend()
         ax7.grid(True)
         ax7.set_xlim(t[0], t[-1])
-        margin_R = ZoomOut_Amount * (np.max(R) - np.min(R))
+        margin_R = 5 * (np.max(R) - np.min(R))
         ax7.set_ylim(np.min(R) - margin_R, np.max(R) + margin_R)
 
-        # 8. Theta vs Time
+        # Theta vs Time
         ax8 = plt.subplot(3, 3, 8)
         ax8.plot(t, Theta, 'c-', linewidth=0.5)
-        ax8.axhline(np.mean(Theta), color='r', linestyle='--', alpha=0.7,
-                    label=f'Mean: {np.mean(Theta):.4f} rad')
+        ax8.axhline(np.mean(Theta), color='r', linestyle='--', label=f'Mean: {np.mean(Theta):.4f} rad')
         ax8.set_xlabel('Time (s)')
         ax8.set_ylabel('Theta (rad)')
-        ax8.set_title('Phase (Theta) vs Time')
+        ax8.set_title('Phase (Theta)')
         ax8.legend()
         ax8.grid(True)
         ax8.set_xlim(t[0], t[-1])
-        margin_Theta = ZoomOut_Amount * (np.max(Theta) - np.min(Theta))
+        margin_Theta = 5 * (np.max(Theta) - np.min(Theta))
         ax8.set_ylim(np.min(Theta) - margin_Theta, np.max(Theta) + margin_Theta)
 
-        # 9. R vs Theta
+        # R vs Theta
         ax9 = plt.subplot(3, 3, 9)
         ax9.plot(Theta, R, 'purple', marker='.', markersize=1, linestyle='', alpha=0.5)
         ax9.axhline(np.mean(R), color='b', linestyle='--', alpha=0.5)
         ax9.axvline(np.mean(Theta), color='r', linestyle='--', alpha=0.5)
         ax9.set_xlabel('Theta (rad)')
-        ax9.set_ylabel('R (V, corrected)')
-        ax9.set_title('R vs Theta - Corrected')
+        ax9.set_ylabel('R (V)')
+        ax9.set_title('R vs Theta')
         ax9.grid(True)
 
         plt.tight_layout()
@@ -576,48 +406,34 @@ class RedPitaya:
                 os.makedirs(self.output_dir)
 
             timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            # Save plot
             img_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.png')
             plt.savefig(img_path, dpi=150)
-            print(f"\n✓ Plot saved: {img_path}")
+            print(f"✓ Saved plot: {img_path}")
 
-            # Save data with timestamps and metadata
             if params.get('save_timestamps', False):
-                data = np.column_stack((
-                    self.sample_timestamps,
-                    t,
-                    R,
-                    Theta,
-                    self.all_X,
-                    self.all_Y
-                ))
+                data = np.column_stack((sample_timestamps, t, R, Theta, all_X, all_Y))
                 csv_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.csv')
 
-                # Save with metadata header
                 with open(csv_path, 'w', newline='') as f:
-                    f.write(f"# Input Mode: {self.input_mode}\n")
-                    f.write(f"# Gain Correction Factor: {self.input_gain_factor:.6f}\n")
-                    f.write(f"# Reference Frequency: {self.ref_freq} Hz\n")
-                    f.write(f"# Reference Amplitude: {params['ref_amp']} V\n")
+                    f.write(f"# Mode: {self.input_mode}\n")
+                    f.write(f"# Gain: {self.input_gain_factor:.6f}\n")
+                    f.write(f"# Ref Freq: {self.ref_freq} Hz\n")
+                    f.write(f"# Ref Amp: {params['ref_amp']} V\n")
                     f.write("AbsoluteTimestamp,RelativeTime,R,Theta,X,Y\n")
                     np.savetxt(f, data, delimiter=",", fmt='%.10f')
 
-                print(f"✓ Data saved with timestamps: {csv_path}")
-                print(f"  Columns: AbsoluteTimestamp (Unix), RelativeTime (s), R, Theta, X, Y")
-                print(f"  Note: All voltage values are gain-corrected ({self.input_gain_factor:.4f}x)")
+                print(f"✓ Saved data: {csv_path}")
             else:
-                data = np.column_stack((t, R, Theta, self.all_X, self.all_Y))
+                data = np.column_stack((t, R, Theta, all_X, all_Y))
                 csv_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.csv')
                 np.savetxt(csv_path, data, delimiter=",",
                            header="Time,R,Theta,X,Y", comments='', fmt='%.6f')
-                print(f"✓ Data saved: {csv_path}")
+                print(f"✓ Saved data: {csv_path}")
         else:
             plt.show()
 
 
 if __name__ == '__main__':
-    # Initialize with input mode settings
     rp = RedPitaya(
         output_dir=OUTPUT_DIRECTORY,
         input_mode=INPUT_MODE,
@@ -634,56 +450,20 @@ if __name__ == '__main__':
         'averaging_window': AVERAGING_WINDOW,
         'output_dir': OUTPUT_DIRECTORY,
         'save_file': SAVE_DATA,
-        'fft': SHOW_FFT,
         'save_timestamps': SAVE_TIMESTAMPS,
         'auto_calibrate': AUTO_CALIBRATE,
         'calibration_time': CALIBRATION_TIME,
     }
 
     print("=" * 60)
-    print("RED PITAYA LOCK-IN AMPLIFIER - WITH MANUAL GAIN SUPPORT")
+    print("RED PITAYA LOCK-IN AMPLIFIER")
     print("=" * 60)
-    print("SETUP: Connect OUT1 directly to IN1")
-    print("=" * 60)
-    print(f"Reference: {REF_FREQUENCY} Hz @ {REF_AMPLITUDE} V on {OUTPUT_CHANNEL}")
-    print(f"Filter Bandwidth: {FILTER_BANDWIDTH} Hz")
-    print(f"Measurement Time: {MEASUREMENT_TIME} s")
-    print(f"Averaging Window: {AVERAGING_WINDOW} samples")
-    print(f"Input Mode Setting: {INPUT_MODE}")
+    print(f"Reference: {REF_FREQUENCY} Hz @ {REF_AMPLITUDE}V")
+    print(f"Filter BW: {FILTER_BANDWIDTH} Hz")
+    print(f"Duration: {MEASUREMENT_TIME}s")
+    print(f"Input Mode: {INPUT_MODE}")
     if INPUT_MODE.upper() == 'MANUAL':
-        print(f"Manual Gain Factor: {MANUAL_GAIN_FACTOR}x")
-        print(f"  → All measurements will be multiplied by {MANUAL_GAIN_FACTOR}x")
-    elif INPUT_MODE.upper() == 'AUTO':
-        print(f"Auto-Calibration: {AUTO_CALIBRATE}")
-    print(f"Save Timestamps: {SAVE_TIMESTAMPS}")
-    print("=" * 60)
-
-    if INPUT_MODE.upper() == 'MANUAL':
-        print(f"Expected for direct OUT1→IN1 connection (with {MANUAL_GAIN_FACTOR}x gain):")
-        print(f"  X = {(REF_AMPLITUDE / 2) * MANUAL_GAIN_FACTOR:.3f} V (in-phase)")
-        print("  Y = 0.000 V (quadrature)")
-        print(f"  R = {(REF_AMPLITUDE / 2) * MANUAL_GAIN_FACTOR:.3f} V (magnitude)")
-    else:
-        print("Expected for direct OUT1→IN1 connection (after calibration):")
-        print(f"  X = {REF_AMPLITUDE / 2:.3f} V (in-phase)")
-        print("  Y = 0.000 V (quadrature)")
-        print(f"  R = {REF_AMPLITUDE / 2:.3f} V (magnitude)")
-
-    print("  Theta = 0.000 rad (phase)")
-    print("  FFT peak at 0 Hz")
-    print("=" * 60)
-
-    if INPUT_MODE.upper() == 'MANUAL':
-        print(f"\nNOTE: Manual gain mode enabled - using {MANUAL_GAIN_FACTOR}x correction factor")
-        print("      No auto-calibration will be performed")
-    elif INPUT_MODE.upper() == 'AUTO' and AUTO_CALIBRATE:
-        print("\nNOTE: Auto-calibration will detect LV/HV mode and correct all measurements")
-    elif INPUT_MODE.upper() == 'LV':
-        print("\nNOTE: Input mode manually set to LV (±1V range)")
-        print("      Make sure your Red Pitaya jumpers are set to LV!")
-    elif INPUT_MODE.upper() == 'HV':
-        print("\nNOTE: Input mode manually set to HV (±20V range, 20:1 divider)")
-        print("      Make sure your Red Pitaya jumpers are set to HV!")
+        print(f"Gain: {MANUAL_GAIN_FACTOR}x")
     print("=" * 60)
 
     rp.run(run_params)
