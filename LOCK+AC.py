@@ -26,8 +26,8 @@ MEASUREMENT_TIME = 30.0  # seconds
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'Manual'
 
-Auto_Lab_Gain = 1.0
-MANUAL_GAIN_FACTOR = 1 + Auto_Lab_Gain  # Only used if INPUT_MODE = 'MANUAL' 27.80999388
+Auto_Lab_Gain = 0.0
+MANUAL_GAIN_FACTOR = 1.08 + Auto_Lab_Gain  # Only used if INPUT_MODE = 'MANUAL' 27.80999388
 
 FILTER_BANDWIDTH = 10  # Hz
 AVERAGING_WINDOW = 1  # samples
