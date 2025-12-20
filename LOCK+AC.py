@@ -25,7 +25,9 @@ MEASUREMENT_TIME = 30.0  # seconds
 
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'Manual'
-MANUAL_GAIN_FACTOR = 27.80999388  # Only used if INPUT_MODE = 'MANUAL'
+
+Auto_Lab_Gain = 1.0
+MANUAL_GAIN_FACTOR = 1 + Auto_Lab_Gain  # Only used if INPUT_MODE = 'MANUAL' 27.80999388
 
 FILTER_BANDWIDTH = 10  # Hz
 AVERAGING_WINDOW = 1  # samples
@@ -59,7 +61,7 @@ class RedPitaya:
         self.ref_sig = self.rp_modules.asg0
         self.scope = self.rp_modules.scope
         self.pid = self.rp_modules.pid0
-        
+
         self.lockin_X = []
         self.lockin_Y = []
         self.capture_timestamps = []
@@ -90,7 +92,7 @@ class RedPitaya:
         self.scope.input1 = 'iq2'  # X (in-phase)
         self.scope.input2 = 'iq2_2'  # Y (quadrature)
         self.scope.decimation = DECIMATION
-        
+
         if self.scope.decimation not in self.allowed_decimations:
             print('Invalid decimation')
             exit()
@@ -128,7 +130,7 @@ class RedPitaya:
         cal_X = []
         cal_Y = []
         start_time = time.time()
-        
+
         while (time.time() - start_time) < cal_time:
             self.scope.single()
             ch1 = np.array(self.scope._data_ch1_current)
@@ -141,7 +143,7 @@ class RedPitaya:
         cal_R = np.sqrt(all_cal_X ** 2 + all_cal_Y ** 2)
         measured_amp = np.mean(cal_R)
         expected_amp = cal_amp / 2.0
-        
+
         self.input_gain_factor = expected_amp / measured_amp
 
         if self.input_gain_factor < 1.05:
@@ -169,7 +171,7 @@ class RedPitaya:
         phase_setting = params.get('phase', 0)
 
         self.ref_sig.output_direct = 'off'
-        
+
         self.lockin.setup(
             frequency=self.ref_freq,
             bandwidth=filter_bw,
@@ -189,10 +191,10 @@ class RedPitaya:
         """Capture scope data and store with timestamp"""
         capture_time = time.time()
         self.scope.single()
-        
+
         ch1 = np.array(self.scope._data_ch1_current)
         ch2 = np.array(self.scope._data_ch2_current)
-        
+
         self.lockin_X.append(ch1)
         self.lockin_Y.append(ch2)
         self.capture_timestamps.append(capture_time)
@@ -277,11 +279,19 @@ class RedPitaya:
 
         # FFT analysis using actual sample rate
         iq = all_X + 1j * all_Y
+        iq -= np.mean(iq)  # remove DC offset
+
         n_pts = len(iq)
         win = np.hanning(n_pts)
         IQwin = iq * win
-        IQfft = np.fft.fftshift(np.fft.fft(IQwin))
-        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / actual_sample_rate))  # Use actual rate
+
+        # Use actual measured sample rate instead of timestamps
+        IQfft = np.fft.fft(IQwin)
+        freqs_lock = np.fft.fftfreq(n_pts, d=1 / actual_sample_rate)
+
+        IQfft = np.fft.fftshift(IQfft)
+        freqs_lock = np.fft.fftshift(freqs_lock)
+
         psd_lock = (np.abs(IQfft) ** 2) / (actual_sample_rate * np.sum(win ** 2))  # Use actual rate
         idx = np.argmax(psd_lock)
 
@@ -292,7 +302,7 @@ class RedPitaya:
         print(f"Mode: {self.input_mode}")
         print(f"Gain: {self.input_gain_factor:.4f}x")
         print(f"FFT peak: {freqs_lock[idx]:.2f} Hz (should be ~0 Hz)")
-        
+
         if abs(freqs_lock[idx]) < 5:
             print("✓ Lock-in is LOCKED")
         else:
@@ -303,13 +313,13 @@ class RedPitaya:
         print(f"Mean X: {np.mean(all_X):.6f} ± {np.std(all_X):.6f} V")
         print(f"Mean Y: {np.mean(all_Y):.6f} ± {np.std(all_Y):.6f} V")
         print(f"Mean Theta: {np.mean(Theta):.6f} ± {np.std(Theta):.6f} rad")
-        
+
         expected_R = params['ref_amp'] / 2
         if abs(np.mean(R) - expected_R) < 0.05:
             print(f"✓ R matches expected {expected_R:.3f}V")
         else:
             print(f"✗ R differs from expected {expected_R:.3f}V by {abs(np.mean(R) - expected_R):.3f}V")
-        
+
         print("=" * 60)
 
         # Create plots
@@ -371,7 +381,7 @@ class RedPitaya:
 
         # IQ plot (with corrected gain)
         ax6 = plt.subplot(3, 3, 6)
-        ax6.plot(all_X, all_Y, 'g.', markersize=1, alpha=0.5)
+        ax6.plot(all_X, all_Y, 'g-', markersize=1, alpha=0.5)
         ax6.plot(np.mean(all_X), np.mean(all_Y), 'r+', markersize=15, markeredgewidth=2, label='Mean')
         ax6.set_xlabel('X (V)')
         ax6.set_ylabel('Y (V)')
@@ -406,15 +416,15 @@ class RedPitaya:
         margin_Theta = 5 * (np.max(Theta) - np.min(Theta))
         ax8.set_ylim(np.min(Theta) - margin_Theta, np.max(Theta) + margin_Theta)
 
-        # R vs Theta
         ax9 = plt.subplot(3, 3, 9)
-        ax9.plot(Theta, R, 'purple', marker='.', markersize=1, linestyle='', alpha=0.5)
-        ax9.axhline(np.mean(R), color='b', linestyle='--', alpha=0.5)
-        ax9.axvline(np.mean(Theta), color='r', linestyle='--', alpha=0.5)
-        ax9.set_xlabel('Theta (rad)')
-        ax9.set_ylabel('R (V)')
-        ax9.set_title('R vs Theta')
+        ax9.plot(Theta, R, 'g-', markersize=1, alpha=0.5)
+        ax9.plot(np.mean(Theta), np.mean(R), 'r+', markersize=15, markeredgewidth=2, label='Mean')
+        ax9.set_xlabel('Theta')
+        ax9.set_ylabel('R')
+        ax9.set_title('IQ Plot')
+        ax9.legend()
         ax9.grid(True)
+        ax9.axis('equal')
 
         plt.tight_layout()
 
