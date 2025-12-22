@@ -298,9 +298,13 @@ class RedPitaya:
         win = np.hanning(n_pts)
         IQwin = iq * win
         IQfft = np.fft.fftshift(np.fft.fft(IQwin))
-        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / actual_sample_rate))  # Use actual rate
-        psd_lock = (np.abs(IQfft) ** 2) / (actual_sample_rate * np.sum(win ** 2))  # Use actual rate
+
+        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / actual_sample_rate))
+        psd_lock = (np.abs(IQfft) ** 2) / (actual_sample_rate * np.sum(win ** 2))
+
         idx = np.argmax(psd_lock)
+        peak_freq = freqs_lock[idx]
+        print(f"FFT peak: {peak_freq:.2f} Hz")
 
         # Print diagnostics
         print("\n" + "=" * 60)
