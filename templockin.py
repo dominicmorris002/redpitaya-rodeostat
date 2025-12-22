@@ -1,9 +1,9 @@
+
 """
 Red Pitaya Lock-In Amplifier with Auto-Calibration
 
 Connect OUT1 to IN1 with a cable for testing.
 Supports AUTO, LV, HV, or MANUAL gain modes.
-Now with continuous acquisition!
 """
 
 from datetime import datetime
@@ -11,9 +11,13 @@ import time
 import math
 import numpy as np
 from matplotlib import pyplot as plt
+import matplotlib
+matplotlib.rcParams['agg.path.chunksize'] = 10000  # or 5000 for safety
 import csv
 import os
 from pyrpl import Pyrpl
+
+
 
 # ============================================================
 # MEASUREMENT PARAMETERS
@@ -27,7 +31,7 @@ MEASUREMENT_TIME = 30.0  # seconds
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'Manual'
 AUTOLAB_GAIN = 0.0
-MANUAL_GAIN_FACTOR = 1.08 + AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'
+MANUAL_GAIN_FACTOR = 1.08 + AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'  27.80999388
 
 FILTER_BANDWIDTH = 10  # Hz
 AVERAGING_WINDOW = 1  # samples
@@ -61,7 +65,7 @@ class RedPitaya:
         self.ref_sig = self.rp_modules.asg0
         self.scope = self.rp_modules.scope
         self.pid = self.rp_modules.pid0
-        
+
         self.lockin_X = []
         self.lockin_Y = []
         self.capture_timestamps = []
@@ -88,25 +92,19 @@ class RedPitaya:
             self.input_mode = "AUTO (will calibrate)"
             print("Input mode: AUTO - will auto-detect")
 
-        # Setup scope for continuous acquisition
+        # Setup scope
         self.scope.input1 = 'iq2'  # X (in-phase)
         self.scope.input2 = 'iq2_2'  # Y (quadrature)
         self.scope.decimation = DECIMATION
-        
+
         if self.scope.decimation not in self.allowed_decimations:
             print('Invalid decimation')
             exit()
 
-        # Start continuous rolling mode
-        self.scope.input1_on = True
-        self.scope.input2_on = True
-        self.scope.average = False
-        self.scope.trigger_source = 'immediately'
         self.scope._start_acquisition_rolling_mode()
+
+        self.scope.average = 'true'
         self.sample_rate = 125e6 / self.scope.decimation
-        
-        # Buffer tracking for continuous reading
-        self.last_index = 0
 
     def calibrate_input_gain(self, cal_freq=100, cal_amp=1.0, cal_time=2.0, force=False):
         """Measure actual input gain to detect LV/HV mode"""
@@ -137,30 +135,20 @@ class RedPitaya:
         cal_X = []
         cal_Y = []
         start_time = time.time()
-        
-        # Use continuous acquisition for calibration
-        self.last_index = 0
+
         while (time.time() - start_time) < cal_time:
-            current_index = self.scope.curve_index()
-            
-            if current_index != self.last_index:
-                ch1 = np.array(self.scope.curve()[self.last_index:current_index])
-                ch2 = np.array(self.scope.curve(2)[self.last_index:current_index])
-                
-                if len(ch1) > 0:
-                    cal_X.append(ch1)
-                    cal_Y.append(ch2)
-                
-                self.last_index = current_index
-            
-            time.sleep(0.01)
+            self.scope.single()
+            ch1 = np.array(self.scope._data_ch1_current)
+            ch2 = np.array(self.scope._data_ch2_current)
+            cal_X.append(ch1)
+            cal_Y.append(ch2)
 
         all_cal_X = np.concatenate(cal_X)
         all_cal_Y = np.concatenate(cal_Y)
         cal_R = np.sqrt(all_cal_X ** 2 + all_cal_Y ** 2)
         measured_amp = np.mean(cal_R)
         expected_amp = cal_amp / 2.0
-        
+
         self.input_gain_factor = expected_amp / measured_amp
 
         if self.input_gain_factor < 1.05:
@@ -188,7 +176,7 @@ class RedPitaya:
         phase_setting = params.get('phase', 0)
 
         self.ref_sig.output_direct = 'off'
-        
+
         self.lockin.setup(
             frequency=self.ref_freq,
             bandwidth=filter_bw,
@@ -205,24 +193,25 @@ class RedPitaya:
         print(f"Gain correction: {self.input_gain_factor:.4f}x")
 
     def capture_lockin(self):
-        """Capture new data from continuous buffer"""
+        """Capture scope data and store with timestamp"""
         capture_time = time.time()
-        
-        current_index = self.scope.curve_index()
-        
-        if current_index != self.last_index:
-            ch1 = np.array(self.scope.curve()[self.last_index:current_index])
-            ch2 = np.array(self.scope.curve(2)[self.last_index:current_index])
-            
-            if len(ch1) > 0:
-                self.lockin_X.append(ch1)
-                self.lockin_Y.append(ch2)
-                self.capture_timestamps.append(capture_time)
-            
-            self.last_index = current_index
-            return ch1, ch2
-        
-        return np.array([]), np.array([])
+
+
+        ch1 = np.array(self.scope._data_ch1_current)
+        ch2 = np.array(self.scope._data_ch2_current)
+
+        MAX_BUFFERS = 100
+
+        self.lockin_X.append(ch1)
+        self.lockin_Y.append(ch2)
+        self.capture_timestamps.append(capture_time)
+
+        if len(self.lockin_X) > MAX_BUFFERS:
+            self.lockin_X.pop(0)
+            self.lockin_Y.pop(0)
+            self.capture_timestamps.pop(0)
+
+        return ch1, ch2
 
     def run(self, params):
         if params.get('auto_calibrate', False):
@@ -233,19 +222,18 @@ class RedPitaya:
             )
 
         self.setup_lockin(params)
-        print("Starting continuous acquisition...")
+        print("Settling...")
         time.sleep(0.5)
 
-        # Reset buffer index
-        self.last_index = 0
-        
         self.acquisition_start_time = time.time()
         print(f"Started: {datetime.fromtimestamp(self.acquisition_start_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
+
+        print("Acquiring continuously for measurement time...")
 
         loop_start = time.time()
         while (time.time() - loop_start) < params['timeout']:
             self.capture_lockin()
-            time.sleep(0.01)  # small delay to avoid hammering the buffer
+            time.sleep(0.001)  # small pause to keep CPU & RP happy
 
         acquisition_end_time = time.time()
 
@@ -275,7 +263,7 @@ class RedPitaya:
 
         for i, capture_time in enumerate(self.capture_timestamps):
             n_samples = len(self.lockin_X[i])
-            capture_duration = n_samples / actual_sample_rate
+            capture_duration = n_samples / actual_sample_rate  # Use actual rate
             sample_times = np.linspace(0, capture_duration, n_samples, endpoint=False)
             sample_timestamps[sample_idx:sample_idx + n_samples] = capture_time + sample_times
             sample_idx += n_samples
@@ -292,21 +280,15 @@ class RedPitaya:
         Theta = np.arctan2(all_Y, all_X)
         t = sample_timestamps - self.acquisition_start_time
 
-        # Get raw signals for plotting (using continuous acquisition)
+        # Get raw signals for plotting
         self.scope.input1 = 'out1'
         self.scope.input2 = 'in1'
-        time.sleep(0.1)
-        
-        # Grab a snapshot from continuous buffer
-        idx = self.scope.curve_index()
-        n_plot_samples = min(int(5 * actual_sample_rate / self.ref_freq), 16384)
-        start_idx = max(0, idx - n_plot_samples)
-        
-        out1_raw = np.array(self.scope.curve()[start_idx:idx])
-        in1_raw = np.array(self.scope.curve(2)[start_idx:idx]) * self.input_gain_factor
-        t_raw = np.arange(len(out1_raw)) / actual_sample_rate
+        time.sleep(0.05)
+        self.scope.single()
+        out1_raw = np.array(self.scope._data_ch1_current)
+        in1_raw = np.array(self.scope._data_ch2_current) * self.input_gain_factor
+        t_raw = np.arange(len(out1_raw)) / actual_sample_rate  # Use actual rate
 
-        # Switch back to lock-in monitoring
         self.scope.input1 = 'iq2'
         self.scope.input2 = 'iq2_2'
 
@@ -316,8 +298,8 @@ class RedPitaya:
         win = np.hanning(n_pts)
         IQwin = iq * win
         IQfft = np.fft.fftshift(np.fft.fft(IQwin))
-        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / actual_sample_rate))
-        psd_lock = (np.abs(IQfft) ** 2) / (actual_sample_rate * np.sum(win ** 2))
+        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / actual_sample_rate))  # Use actual rate
+        psd_lock = (np.abs(IQfft) ** 2) / (actual_sample_rate * np.sum(win ** 2))  # Use actual rate
         idx = np.argmax(psd_lock)
 
         # Print diagnostics
@@ -327,24 +309,24 @@ class RedPitaya:
         print(f"Mode: {self.input_mode}")
         print(f"Gain: {self.input_gain_factor:.4f}x")
         print(f"FFT peak: {freqs_lock[idx]:.2f} Hz (should be ~0 Hz)")
-        
+
         if abs(freqs_lock[idx]) < 5:
-            print("Lock-in is LOCKED")
+            print("✓ Lock-in is LOCKED")
         else:
-            print("WARNING: Not locked! Peak should be at 0 Hz")
+            print("✗ WARNING: Not locked! Peak should be at 0 Hz")
 
         print(f"Samples: {len(all_X)}, Duration: {t[-1]:.3f}s")
         print(f"Mean R: {np.mean(R):.6f} ± {np.std(R):.6f} V")
         print(f"Mean X: {np.mean(all_X):.6f} ± {np.std(all_X):.6f} V")
         print(f"Mean Y: {np.mean(all_Y):.6f} ± {np.std(all_Y):.6f} V")
         print(f"Mean Theta: {np.mean(Theta):.6f} ± {np.std(Theta):.6f} rad")
-        
+
         expected_R = params['ref_amp'] / 2
         if abs(np.mean(R) - expected_R) < 0.05:
-            print(f"R matches expected {expected_R:.3f}V")
+            print(f"✓ R matches expected {expected_R:.3f}V")
         else:
-            print(f"R differs from expected {expected_R:.3f}V by {abs(np.mean(R) - expected_R):.3f}V")
-        
+            print(f"✗ R differs from expected {expected_R:.3f}V by {abs(np.mean(R) - expected_R):.3f}V")
+
         print("=" * 60)
 
         # Create plots
@@ -352,7 +334,9 @@ class RedPitaya:
 
         # Reference signal
         ax1 = plt.subplot(3, 3, 1)
-        ax1.plot(t_raw * 1000, out1_raw, 'b-', linewidth=1)
+        n_periods = 5
+        n_plot = min(int(n_periods * actual_sample_rate / self.ref_freq), len(out1_raw))
+        ax1.plot(t_raw[:n_plot] * 1000, out1_raw[:n_plot], 'b-', linewidth=1)
         ax1.set_xlabel('Time (ms)')
         ax1.set_ylabel('OUT1 (V)')
         ax1.set_title(f'Reference @ {self.ref_freq} Hz')
@@ -360,7 +344,7 @@ class RedPitaya:
 
         # Input signal
         ax2 = plt.subplot(3, 3, 2)
-        ax2.plot(t_raw * 1000, in1_raw, 'r-', linewidth=1)
+        ax2.plot(t_raw[:n_plot] * 1000, in1_raw[:n_plot], 'r-', linewidth=1)
         ax2.set_xlabel('Time (ms)')
         ax2.set_ylabel('IN1 (V)')
         ax2.set_title(f'Input - {self.input_mode}')
@@ -386,6 +370,8 @@ class RedPitaya:
         ax4.legend()
         ax4.grid(True)
         ax4.set_xlim(t[0], t[-1])
+        margin_X = 5 * (np.max(all_X) - np.min(all_X))
+        ax4.set_ylim(np.min(all_X) - margin_X, np.max(all_X) + margin_X)
 
         # Y vs Time
         ax5 = plt.subplot(3, 3, 5)
@@ -397,8 +383,10 @@ class RedPitaya:
         ax5.legend()
         ax5.grid(True)
         ax5.set_xlim(t[0], t[-1])
+        margin_Y = 5 * (np.max(all_Y) - np.min(all_Y))
+        ax5.set_ylim(np.min(all_Y) - margin_Y, np.max(all_Y) + margin_Y)
 
-        # IQ plot
+        # IQ plot (with corrected gain)
         ax6 = plt.subplot(3, 3, 6)
         ax6.plot(all_X, all_Y, 'g.', markersize=1, alpha=0.5)
         ax6.plot(np.mean(all_X), np.mean(all_Y), 'r+', markersize=15, markeredgewidth=2, label='Mean')
@@ -419,6 +407,8 @@ class RedPitaya:
         ax7.legend()
         ax7.grid(True)
         ax7.set_xlim(t[0], t[-1])
+        margin_R = 5 * (np.max(R) - np.min(R))
+        ax7.set_ylim(np.min(R) - margin_R, np.max(R) + margin_R)
 
         # Theta vs Time
         ax8 = plt.subplot(3, 3, 8)
@@ -430,6 +420,8 @@ class RedPitaya:
         ax8.legend()
         ax8.grid(True)
         ax8.set_xlim(t[0], t[-1])
+        margin_Theta = 5 * (np.max(Theta) - np.min(Theta))
+        ax8.set_ylim(np.min(Theta) - margin_Theta, np.max(Theta) + margin_Theta)
 
         # Theta vs R
         ax9 = plt.subplot(3, 3, 9)
@@ -437,7 +429,7 @@ class RedPitaya:
         ax9.plot(np.mean(Theta), np.mean(R), 'r+', markersize=15, markeredgewidth=2, label='Mean')
         ax9.set_xlabel('Theta')
         ax9.set_ylabel('R')
-        ax9.set_title('Polar Plot')
+        ax9.set_title('IQ Plot')
         ax9.legend()
         ax9.grid(True)
         ax9.axis('equal')
@@ -451,7 +443,7 @@ class RedPitaya:
             timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
             img_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.png')
             plt.savefig(img_path, dpi=150)
-            print(f"Saved plot: {img_path}")
+            print(f"✓ Saved plot: {img_path}")
 
             if params.get('save_timestamps', False):
                 data = np.column_stack((sample_timestamps, t, R, Theta, all_X, all_Y))
@@ -467,13 +459,13 @@ class RedPitaya:
                     f.write("AbsoluteTimestamp,RelativeTime,R,Theta,X,Y\n")
                     np.savetxt(f, data, delimiter=",", fmt='%.10f')
 
-                print(f"Saved data: {csv_path}")
+                print(f"✓ Saved data: {csv_path}")
             else:
                 data = np.column_stack((t, R, Theta, all_X, all_Y))
                 csv_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.csv')
                 np.savetxt(csv_path, data, delimiter=",",
                            header="Time,R,Theta,X,Y", comments='', fmt='%.6f')
-                print(f"Saved data: {csv_path}")
+                print(f"✓ Saved data: {csv_path}")
         else:
             plt.show()
 
@@ -501,7 +493,7 @@ if __name__ == '__main__':
     }
 
     print("=" * 60)
-    print("RED PITAYA LOCK-IN AMPLIFIER (CONTINUOUS)")
+    print("RED PITAYA LOCK-IN AMPLIFIER")
     print("=" * 60)
     print(f"Reference: {REF_FREQUENCY} Hz @ {REF_AMPLITUDE}V")
     print(f"Filter BW: {FILTER_BANDWIDTH} Hz")
