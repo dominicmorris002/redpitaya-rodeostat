@@ -1,7 +1,5 @@
-
-
 """
-Red Pitaya Lock-In Amplifier with Auto-Calibration
+Red Pitaya Lock-In Amplifier with Auto-Calibration and Offset Correction
 
 Connect OUT1 to IN1 with a cable for testing.
 Supports AUTO, LV, HV, or MANUAL gain modes.
@@ -28,7 +26,11 @@ MEASUREMENT_TIME = 30.0  # seconds
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'Manual'
 AUTOLAB_GAIN = 0.0
-MANUAL_GAIN_FACTOR = 1.08 + AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'  27.80999388
+MANUAL_GAIN_FACTOR = 1.08 + AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'
+
+# OFFSET CORRECTION
+X_OFFSET = 0.0  # Volts - subtracted from X values
+Y_OFFSET = 0.0  # Volts - subtracted from Y values
 
 FILTER_BANDWIDTH = 10  # Hz
 AVERAGING_WINDOW = 1  # samples
@@ -54,15 +56,15 @@ while datetime.now() < START_TIME:
 class RedPitaya:
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
-    def __init__(self, output_dir='test_data', input_mode='AUTO', manual_gain=1.0):
-        self.rp = Pyrpl(config='lockin_config', hostname='rp-f073ce.local')
+    def __init__(self, output_dir='test_data', input_mode='AUTO', manual_gain=1.0, x_offset=0.0, y_offset=0.0):
+        self.rp = Pyrpl(config='lockin_config5', hostname='rp-f073ce.local')
         self.output_dir = output_dir
         self.rp_modules = self.rp.rp
         self.lockin = self.rp_modules.iq2
         self.ref_sig = self.rp_modules.asg0
         self.scope = self.rp_modules.scope
         self.pid = self.rp_modules.pid0
-        
+
         self.lockin_X = []
         self.lockin_Y = []
         self.capture_timestamps = []
@@ -72,6 +74,10 @@ class RedPitaya:
         self.input_gain_factor = manual_gain
         self.input_mode_setting = input_mode.upper()
         self.input_mode = "Unknown"
+
+        # Setup offsets
+        self.x_offset = x_offset
+        self.y_offset = y_offset
 
         if self.input_mode_setting == 'MANUAL':
             self.input_gain_factor = manual_gain
@@ -89,11 +95,14 @@ class RedPitaya:
             self.input_mode = "AUTO (will calibrate)"
             print("Input mode: AUTO - will auto-detect")
 
+        if self.x_offset != 0.0 or self.y_offset != 0.0:
+            print(f"Offset correction: X={self.x_offset:.6f}V, Y={self.y_offset:.6f}V")
+
         # Setup scope
         self.scope.input1 = 'iq2'  # X (in-phase)
         self.scope.input2 = 'iq2_2'  # Y (quadrature)
         self.scope.decimation = DECIMATION
-        
+
         if self.scope.decimation not in self.allowed_decimations:
             print('Invalid decimation')
             exit()
@@ -131,7 +140,7 @@ class RedPitaya:
         cal_X = []
         cal_Y = []
         start_time = time.time()
-        
+
         while (time.time() - start_time) < cal_time:
             self.scope.single()
             ch1 = np.array(self.scope._data_ch1_current)
@@ -144,7 +153,7 @@ class RedPitaya:
         cal_R = np.sqrt(all_cal_X ** 2 + all_cal_Y ** 2)
         measured_amp = np.mean(cal_R)
         expected_amp = cal_amp / 2.0
-        
+
         self.input_gain_factor = expected_amp / measured_amp
 
         if self.input_gain_factor < 1.05:
@@ -172,7 +181,7 @@ class RedPitaya:
         phase_setting = params.get('phase', 0)
 
         self.ref_sig.output_direct = 'off'
-        
+
         self.lockin.setup(
             frequency=self.ref_freq,
             bandwidth=filter_bw,
@@ -187,15 +196,17 @@ class RedPitaya:
 
         print(f"Lock-in: {self.ref_freq} Hz, {ref_amp}V, BW: {filter_bw} Hz")
         print(f"Gain correction: {self.input_gain_factor:.4f}x")
+        if self.x_offset != 0.0 or self.y_offset != 0.0:
+            print(f"Offset correction: X={self.x_offset:.6f}V, Y={self.y_offset:.6f}V")
 
     def capture_lockin(self):
         """Capture scope data and store with timestamp"""
         capture_time = time.time()
         self.scope.single()
-        
+
         ch1 = np.array(self.scope._data_ch1_current)
         ch2 = np.array(self.scope._data_ch2_current)
-        
+
         self.lockin_X.append(ch1)
         self.lockin_Y.append(ch2)
         self.capture_timestamps.append(capture_time)
@@ -223,9 +234,9 @@ class RedPitaya:
 
         acquisition_end_time = time.time()
 
-        # Concatenate and apply gain correction
-        all_X = np.concatenate(self.lockin_X) * self.input_gain_factor
-        all_Y = np.concatenate(self.lockin_Y) * self.input_gain_factor
+        # Concatenate and apply gain correction AND offset correction
+        all_X = (np.concatenate(self.lockin_X) * self.input_gain_factor) - self.x_offset
+        all_Y = (np.concatenate(self.lockin_Y) * self.input_gain_factor) - self.y_offset
 
         # Calculate ACTUAL sampling rate
         total_samples = len(all_X)
@@ -290,12 +301,14 @@ class RedPitaya:
 
         # Print diagnostics
         print("\n" + "=" * 60)
-        print("RESULTS (GAIN-CORRECTED)")
+        print("RESULTS (GAIN & OFFSET CORRECTED)")
         print("=" * 60)
         print(f"Mode: {self.input_mode}")
         print(f"Gain: {self.input_gain_factor:.4f}x")
+        print(f"X Offset: {self.x_offset:.6f}V")
+        print(f"Y Offset: {self.y_offset:.6f}V")
         print(f"FFT peak: {freqs_lock[idx]:.2f} Hz (should be ~0 Hz)")
-        
+
         if abs(freqs_lock[idx]) < 5:
             print("✓ Lock-in is LOCKED")
         else:
@@ -306,13 +319,13 @@ class RedPitaya:
         print(f"Mean X: {np.mean(all_X):.6f} ± {np.std(all_X):.6f} V")
         print(f"Mean Y: {np.mean(all_Y):.6f} ± {np.std(all_Y):.6f} V")
         print(f"Mean Theta: {np.mean(Theta):.6f} ± {np.std(Theta):.6f} rad")
-        
+
         expected_R = params['ref_amp'] / 2
         if abs(np.mean(R) - expected_R) < 0.05:
             print(f"✓ R matches expected {expected_R:.3f}V")
         else:
             print(f"✗ R differs from expected {expected_R:.3f}V by {abs(np.mean(R) - expected_R):.3f}V")
-        
+
         print("=" * 60)
 
         # Create plots
@@ -352,7 +365,7 @@ class RedPitaya:
         ax4.axhline(np.mean(all_X), color='r', linestyle='--', label=f'Mean: {np.mean(all_X):.4f}V')
         ax4.set_xlabel('Time (s)')
         ax4.set_ylabel('X (V)')
-        ax4.set_title('In-phase (X)')
+        ax4.set_title('In-phase (X) - Offset Corrected')
         ax4.legend()
         ax4.grid(True)
         ax4.set_xlim(t[0], t[-1])
@@ -365,14 +378,14 @@ class RedPitaya:
         ax5.axhline(np.mean(all_Y), color='b', linestyle='--', label=f'Mean: {np.mean(all_Y):.4f}V')
         ax5.set_xlabel('Time (s)')
         ax5.set_ylabel('Y (V)')
-        ax5.set_title('Quadrature (Y)')
+        ax5.set_title('Quadrature (Y) - Offset Corrected')
         ax5.legend()
         ax5.grid(True)
         ax5.set_xlim(t[0], t[-1])
         margin_Y = 5 * (np.max(all_Y) - np.min(all_Y))
         ax5.set_ylim(np.min(all_Y) - margin_Y, np.max(all_Y) + margin_Y)
 
-        # IQ plot (with corrected gain)
+        # IQ plot (with corrected gain and offset)
         ax6 = plt.subplot(3, 3, 6)
         ax6.plot(all_X, all_Y, 'g.', markersize=1, alpha=0.5)
         ax6.plot(np.mean(all_X), np.mean(all_Y), 'r+', markersize=15, markeredgewidth=2, label='Mean')
@@ -438,6 +451,8 @@ class RedPitaya:
                 with open(csv_path, 'w', newline='') as f:
                     f.write(f"# Mode: {self.input_mode}\n")
                     f.write(f"# Gain: {self.input_gain_factor:.6f}\n")
+                    f.write(f"# X Offset: {self.x_offset:.6f} V\n")
+                    f.write(f"# Y Offset: {self.y_offset:.6f} V\n")
                     f.write(f"# Ref Freq: {self.ref_freq} Hz\n")
                     f.write(f"# Ref Amp: {params['ref_amp']} V\n")
                     f.write(f"# Nominal Sample Rate: {self.sample_rate:.2f} Hz\n")
@@ -460,7 +475,9 @@ if __name__ == '__main__':
     rp = RedPitaya(
         output_dir=OUTPUT_DIRECTORY,
         input_mode=INPUT_MODE,
-        manual_gain=MANUAL_GAIN_FACTOR
+        manual_gain=MANUAL_GAIN_FACTOR,
+        x_offset=X_OFFSET,
+        y_offset=Y_OFFSET
     )
 
     run_params = {
@@ -487,6 +504,8 @@ if __name__ == '__main__':
     print(f"Input Mode: {INPUT_MODE}")
     if INPUT_MODE.upper() == 'MANUAL':
         print(f"Gain: {MANUAL_GAIN_FACTOR}x")
+    if X_OFFSET != 0.0 or Y_OFFSET != 0.0:
+        print(f"Offsets: X={X_OFFSET:.6f}V, Y={Y_OFFSET:.6f}V")
     print("=" * 60)
 
     rp.run(run_params)
