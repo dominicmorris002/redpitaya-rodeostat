@@ -1,16 +1,15 @@
 """
-Red Pitaya Lock-In Amplifier with Auto-Calibration and Offset Correction
+Red Pitaya Lock-In Amplifier Data Logger
 
+Uses PyRPL's built-in lock-in amplifier (iq2 module) and logs the results.
 Connect OUT1 to IN1 with a cable for testing.
-Supports AUTO, LV, HV, or MANUAL gain modes.
+Supports AUTO, LV, HV, or MANUAL gain modes for scaling.
 """
 
 from datetime import datetime
 import time
-import math
 import numpy as np
 from matplotlib import pyplot as plt
-import csv
 import os
 from pyrpl import Pyrpl
 
@@ -24,21 +23,20 @@ PHASE_OFFSET = 0  # degrees
 MEASUREMENT_TIME = 30.0  # seconds
 
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
-INPUT_MODE = 'Manual'
+INPUT_MODE = 'AUTO'
 AUTOLAB_GAIN = 0.0
-MANUAL_GAIN_FACTOR = 1.08 + AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'
+MANUAL_GAIN_FACTOR = 1.0815 + AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'
 
 # OFFSET CORRECTION
 X_OFFSET = 0.0  # Volts - subtracted from X values
 Y_OFFSET = 0.0  # Volts - subtracted from Y values
 
 FILTER_BANDWIDTH = 10  # Hz
-AVERAGING_WINDOW = 1  # samples
+AVERAGING_WINDOW = 1  # samples (moving average on logged data)
 DECIMATION = 8192
 
 SAVE_DATA = True
 OUTPUT_DIRECTORY = 'test_data'
-SAVE_TIMESTAMPS = True
 
 AUTO_CALIBRATE = True  # Only used if INPUT_MODE = 'AUTO'
 CALIBRATION_TIME = 2.0  # seconds
@@ -46,14 +44,19 @@ CALIBRATION_TIME = 2.0  # seconds
 
 START_TIME_FILE = "start_time.txt"
 
-with open(START_TIME_FILE, "r") as f:
-    START_TIME = datetime.fromisoformat(f.read().strip())
+# Synchronization with other processes
+try:
+    with open(START_TIME_FILE, "r") as f:
+        START_TIME = datetime.fromisoformat(f.read().strip())
+    while datetime.now() < START_TIME:
+        time.sleep(0.001)
+except FileNotFoundError:
+    pass  # No sync file, start immediately
 
-while datetime.now() < START_TIME:
-    time.sleep(0.001)
 
+class RedPitayaLockInLogger:
+    """Data logger for PyRPL's built-in lock-in amplifier"""
 
-class RedPitaya:
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
     def __init__(self, output_dir='test_data', input_mode='AUTO', manual_gain=1.0, x_offset=0.0, y_offset=0.0):
@@ -63,14 +66,12 @@ class RedPitaya:
         self.lockin = self.rp_modules.iq2
         self.ref_sig = self.rp_modules.asg0
         self.scope = self.rp_modules.scope
-        self.pid = self.rp_modules.pid0
 
         self.lockin_X = []
         self.lockin_Y = []
-        self.capture_timestamps = []
-        self.acquisition_start_time = None
+        self.capture_times = []
 
-        # Setup input gain
+        # Setup input gain scaling
         self.input_gain_factor = manual_gain
         self.input_mode_setting = input_mode.upper()
         self.input_mode = "Unknown"
@@ -98,29 +99,34 @@ class RedPitaya:
         if self.x_offset != 0.0 or self.y_offset != 0.0:
             print(f"Offset correction: X={self.x_offset:.6f}V, Y={self.y_offset:.6f}V")
 
-        # Setup scope
+        # Setup scope to read lock-in outputs
         self.scope.input1 = 'iq2'  # X (in-phase)
         self.scope.input2 = 'iq2_2'  # Y (quadrature)
         self.scope.decimation = DECIMATION
 
         if self.scope.decimation not in self.allowed_decimations:
-            print('Invalid decimation')
-            exit()
+            raise ValueError(f'Invalid decimation. Must be one of {self.allowed_decimations}')
 
         self.scope._start_acquisition_rolling_mode()
-        self.scope.average = 'true'
-        self.sample_rate = 125e6 / self.scope.decimation
+        self.scope.average = True
+
+        # Nominal sample rate (actual rate may vary slightly)
+        self.nominal_sample_rate = 125e6 / self.scope.decimation
 
     def calibrate_input_gain(self, cal_freq=100, cal_amp=1.0, cal_time=2.0, force=False):
-        """Measure actual input gain to detect LV/HV mode"""
+        """
+        Measure actual input scaling to detect LV/HV mode.
+        This measures the loopback gain for OUT1->IN1 through PyRPL's lock-in.
+        """
         if not force and self.input_mode_setting != 'AUTO':
             print(f"Skipping calibration - using {self.input_mode}")
             return self.input_gain_factor
 
         print("\n" + "=" * 60)
-        print("CALIBRATING INPUT GAIN...")
+        print("CALIBRATING INPUT SCALING...")
         print("=" * 60)
 
+        # Configure lock-in for calibration
         self.ref_sig.output_direct = 'off'
         self.lockin.setup(
             frequency=cal_freq,
@@ -135,7 +141,7 @@ class RedPitaya:
             quadrature_factor=1.0)
 
         print(f"Generating {cal_amp}V at {cal_freq} Hz, measuring for {cal_time}s...")
-        time.sleep(0.5)
+        time.sleep(0.5)  # Let lock-in settle
 
         cal_X = []
         cal_Y = []
@@ -148,32 +154,37 @@ class RedPitaya:
             cal_X.append(ch1)
             cal_Y.append(ch2)
 
+        # Calculate measured amplitude
         all_cal_X = np.concatenate(cal_X)
         all_cal_Y = np.concatenate(cal_Y)
         cal_R = np.sqrt(all_cal_X ** 2 + all_cal_Y ** 2)
         measured_amp = np.mean(cal_R)
+
+        # For loopback with PyRPL lock-in, output amplitude gets demodulated to DC
+        # Lock-in DC output = A/2 for input amplitude A
         expected_amp = cal_amp / 2.0
 
         self.input_gain_factor = expected_amp / measured_amp
 
+        # Classify the mode based on gain
         if self.input_gain_factor < 1.05:
             self.input_mode = "LV (±1V)"
-        elif self.input_gain_factor < 1.15:
-            self.input_mode = "LV (±1V) with loading"
+        elif self.input_gain_factor < 2.0:
+            self.input_mode = f"LV with loading ({self.input_gain_factor:.2f}x)"
         elif self.input_gain_factor < 15:
-            self.input_mode = f"Unknown ({self.input_gain_factor:.2f}x)"
+            self.input_mode = f"Custom/Unknown mode ({self.input_gain_factor:.2f}x)"
         else:
-            attenuation = 1.0 / self.input_gain_factor
-            self.input_mode = f"HV (±20V, {attenuation:.1f}:1)"
+            self.input_mode = f"HV (±20V, {self.input_gain_factor:.1f}:1 divider)"
 
-        print(f"Output: {cal_amp:.3f}V, Expected: {expected_amp:.3f}V, Measured: {measured_amp:.3f}V")
-        print(f"Gain factor: {self.input_gain_factor:.4f}x")
-        print(f"Mode: {self.input_mode}")
+        print(f"Output: {cal_amp:.3f}V, Expected (A/2): {expected_amp:.3f}V, Measured: {measured_amp:.3f}V")
+        print(f"Scaling factor: {self.input_gain_factor:.4f}x")
+        print(f"Detected mode: {self.input_mode}")
         print("=" * 60 + "\n")
 
         return self.input_gain_factor
 
     def setup_lockin(self, params):
+        """Configure PyRPL's lock-in amplifier"""
         self.ref_freq = params['ref_freq']
         self.ref_period = 1 / self.ref_freq
         ref_amp = params['ref_amp']
@@ -182,6 +193,7 @@ class RedPitaya:
 
         self.ref_sig.output_direct = 'off'
 
+        # Configure PyRPL's iq2 module (the actual lock-in)
         self.lockin.setup(
             frequency=self.ref_freq,
             bandwidth=filter_bw,
@@ -194,26 +206,38 @@ class RedPitaya:
             output_signal='quadrature',
             quadrature_factor=1.0)
 
-        print(f"Lock-in: {self.ref_freq} Hz, {ref_amp}V, BW: {filter_bw} Hz")
+        # Verify what PyRPL actually set
+        actual_freq = self.lockin.frequency
+        actual_amp = self.lockin.amplitude
+
+        print(f"Lock-in frequency: {self.ref_freq} Hz (actual: {actual_freq:.2f} Hz)")
+        print(f"Lock-in bandwidth: {filter_bw} Hz")
+        print(f"Reference amplitude: {ref_amp}V on {params['output_ref']} (actual: {actual_amp:.3f}V)")
+
+        if abs(actual_freq - self.ref_freq) > 0.1:
+            print(f"⚠ WARNING: Requested {self.ref_freq} Hz but PyRPL set {actual_freq:.2f} Hz!")
         print(f"Gain correction: {self.input_gain_factor:.4f}x")
         if self.x_offset != 0.0 or self.y_offset != 0.0:
             print(f"Offset correction: X={self.x_offset:.6f}V, Y={self.y_offset:.6f}V")
 
     def capture_lockin(self):
-        """Capture scope data and store with timestamp"""
+        """Capture one scope trace of lock-in outputs"""
         capture_time = time.time()
         self.scope.single()
 
-        ch1 = np.array(self.scope._data_ch1_current)
-        ch2 = np.array(self.scope._data_ch2_current)
+        ch1 = np.array(self.scope._data_ch1_current)  # X from PyRPL
+        ch2 = np.array(self.scope._data_ch2_current)  # Y from PyRPL
 
         self.lockin_X.append(ch1)
         self.lockin_Y.append(ch2)
-        self.capture_timestamps.append(capture_time)
+        self.capture_times.append(capture_time)
 
         return ch1, ch2
 
     def run(self, params):
+        """Run the lock-in data logging"""
+
+        # Auto-calibrate if requested
         if params.get('auto_calibrate', False):
             self.calibrate_input_gain(
                 cal_freq=params['ref_freq'],
@@ -221,120 +245,187 @@ class RedPitaya:
                 cal_time=params.get('calibration_time', 2.0)
             )
 
+        # Setup and start acquisition
         self.setup_lockin(params)
-        print("Settling...")
+        print("Allowing lock-in to settle...")
         time.sleep(0.5)
 
-        self.acquisition_start_time = time.time()
-        print(f"Started: {datetime.fromtimestamp(self.acquisition_start_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
+        acquisition_start_time = time.time()
+        capture_count = 0
+        print(f"Started: {datetime.fromtimestamp(acquisition_start_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
 
+        # Data collection loop
         loop_start = time.time()
         while (time.time() - loop_start) < params['timeout']:
             self.capture_lockin()
+            capture_count += 1
 
         acquisition_end_time = time.time()
+        actual_duration = acquisition_end_time - acquisition_start_time
 
-        # Concatenate and apply gain correction AND offset correction
-        all_X = (np.concatenate(self.lockin_X) * self.input_gain_factor) - self.x_offset
-        all_Y = (np.concatenate(self.lockin_Y) * self.input_gain_factor) - self.y_offset
+        print(f"✓ Captured {capture_count} scope buffers")
 
-        # Calculate ACTUAL sampling rate
-        total_samples = len(all_X)
-        actual_duration = acquisition_end_time - self.acquisition_start_time
-        actual_sample_rate = total_samples / actual_duration
-        sample_rate_error = (actual_sample_rate - self.sample_rate) / self.sample_rate * 100
+        # Concatenate all captured data
+        all_X_raw = np.concatenate(self.lockin_X)
+        all_Y_raw = np.concatenate(self.lockin_Y)
 
-        print("\n" + "=" * 60)
-        print("SAMPLING RATE ANALYSIS")
-        print("=" * 60)
-        print(f"Nominal sample rate: {self.sample_rate:.2f} Hz")
-        print(f"Actual sample rate: {actual_sample_rate:.2f} Hz")
-        print(f"Sample rate error: {sample_rate_error:.4f}%")
-        print(f"Total samples: {total_samples}")
-        print(f"Actual duration: {actual_duration:.3f}s")
-        print("=" * 60)
+        # Apply gain correction and offset correction
+        all_X = (all_X_raw * self.input_gain_factor) - self.x_offset
+        all_Y = (all_Y_raw * self.input_gain_factor) - self.y_offset
 
-        # Generate timestamps for each sample
-        sample_timestamps = np.zeros(total_samples)
-        sample_idx = 0
-
-        for i, capture_time in enumerate(self.capture_timestamps):
-            n_samples = len(self.lockin_X[i])
-            capture_duration = n_samples / actual_sample_rate  # Use actual rate
-            sample_times = np.linspace(0, capture_duration, n_samples, endpoint=False)
-            sample_timestamps[sample_idx:sample_idx + n_samples] = capture_time + sample_times
-            sample_idx += n_samples
-
-        # Apply averaging filter
+        # Apply averaging filter if requested
         averaging_window = params.get('averaging_window', 1)
         if averaging_window > 1:
             all_X = np.convolve(all_X, np.ones(averaging_window) / averaging_window, mode='valid')
             all_Y = np.convolve(all_Y, np.ones(averaging_window) / averaging_window, mode='valid')
-            sample_timestamps = sample_timestamps[:len(all_X)]
             print(f"Applied {averaging_window}-sample moving average")
 
+        # Calculate magnitude and phase
         R = np.sqrt(all_X ** 2 + all_Y ** 2)
         Theta = np.arctan2(all_Y, all_X)
-        t = sample_timestamps - self.acquisition_start_time
 
-        # Get raw signals for plotting
+        # Create time vector and sample index
+        n_samples = len(all_X)
+        sample_index = np.arange(n_samples)
+        t = sample_index / (n_samples / actual_duration)
+
+        # Get raw signals for diagnostic plots
         self.scope.input1 = 'out1'
         self.scope.input2 = 'in1'
         time.sleep(0.05)
         self.scope.single()
         out1_raw = np.array(self.scope._data_ch1_current)
         in1_raw = np.array(self.scope._data_ch2_current) * self.input_gain_factor
-        t_raw = np.arange(len(out1_raw)) / actual_sample_rate  # Use actual rate
+        t_raw = np.linspace(0, len(out1_raw) / self.nominal_sample_rate, len(out1_raw))
 
+        # Restore scope to lock-in outputs
         self.scope.input1 = 'iq2'
         self.scope.input2 = 'iq2_2'
 
-        # FFT analysis using actual sample rate
+        # FFT analysis of lock-in output (should be centered at DC)
         iq = all_X + 1j * all_Y
         n_pts = len(iq)
         win = np.hanning(n_pts)
         IQwin = iq * win
         IQfft = np.fft.fftshift(np.fft.fft(IQwin))
-        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, 1.0 / actual_sample_rate))  # Use actual rate
-        psd_lock = (np.abs(IQfft) ** 2) / (actual_sample_rate * np.sum(win ** 2))  # Use actual rate
-        idx = np.argmax(psd_lock)
+        freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, t[1] - t[0]))
+        psd_lock = (np.abs(IQfft) ** 2) / (len(t) * np.sum(win ** 2))
 
-        # Print diagnostics
+        # Find the DC peak (should be the strongest)
+        idx_dc = np.argmin(np.abs(freqs_lock))  # Closest to 0 Hz
+        dc_power = psd_lock[idx_dc]
+
+        # Find ALL significant peaks in the FULL spectrum
+        idx_max_global = np.argmax(psd_lock)
+        freq_max_global = freqs_lock[idx_max_global]
+
+        # Find peaks EXCLUDING DC region (±50 Hz)
+        dc_exclusion_mask = np.abs(freqs_lock) > 50
+        psd_no_dc = psd_lock.copy()
+        psd_no_dc[~dc_exclusion_mask] = 0
+
+        idx_max_no_dc = np.argmax(psd_no_dc)
+        freq_max_no_dc = freqs_lock[idx_max_no_dc]
+        power_max_no_dc = psd_no_dc[idx_max_no_dc]
+
+        # Find top peaks above threshold
+        threshold = 0.01 * dc_power  # 1% of DC power
+        peak_indices = np.where(psd_lock > threshold)[0]
+        peak_freqs = freqs_lock[peak_indices]
+        peak_powers = psd_lock[peak_indices]
+
+        # Sort by power
+        sort_idx = np.argsort(peak_powers)[::-1]
+        top_10_freqs = peak_freqs[sort_idx[:min(10, len(peak_freqs))]]
+        top_10_powers = peak_powers[sort_idx[:min(10, len(peak_powers))]]
+
+        print(f"\n⚠ FFT ANALYSIS:")
+        print(f"DC peak (0 Hz): {dc_power:.2e}")
+        print(f"Largest non-DC peak: {freq_max_no_dc:+.2f} Hz (power: {power_max_no_dc:.2e})")
+        print(f"Ratio (non-DC/DC): {power_max_no_dc / dc_power * 100:.1f}%")
+
+        print(f"\nTop 10 frequency peaks:")
+        for i, (f, p) in enumerate(zip(top_10_freqs, top_10_powers)):
+            marker = " ← DC" if abs(f) < 5 else ""
+            marker += " ⚠ SPURIOUS!" if abs(f) > 50 and p > 0.01 * dc_power else ""
+            print(f"  {i + 1}. {f:+8.2f} Hz (power: {p:.2e}){marker}")
+
+        # Determine lock status
+        if power_max_no_dc > 0.1 * dc_power:  # Non-DC peak > 10% of DC
+            print(f"\n✗ WARNING: Large spurious peak at {freq_max_no_dc:+.2f} Hz!")
+            print(f"   This peak is {power_max_no_dc / dc_power * 100:.1f}% of DC power")
+            print(f"   Possible causes:")
+            print(f"     - Frequency offset/drift")
+            print(f"     - Sampling artifacts")
+            print(f"     - Aliasing from decimation")
+            freq_offset = freq_max_no_dc  # Use this for later checks
+        elif abs(freq_max_global) < 5:
+            print(f"\n✓ Spectrum dominated by DC (properly locked)")
+            freq_offset = 0
+        else:
+            print(f"\n⚠ Unexpected spectrum structure")
+            freq_offset = freq_max_global
+
+        # Print results
         print("\n" + "=" * 60)
-        print("RESULTS (GAIN & OFFSET CORRECTED)")
+        print("LOCK-IN RESULTS (CORRECTED)")
         print("=" * 60)
         print(f"Mode: {self.input_mode}")
-        print(f"Gain: {self.input_gain_factor:.4f}x")
+        print(f"Gain correction: {self.input_gain_factor:.4f}x")
         print(f"X Offset: {self.x_offset:.6f}V")
         print(f"Y Offset: {self.y_offset:.6f}V")
-        print(f"FFT peak: {freqs_lock[idx]:.2f} Hz (should be ~0 Hz)")
+        print(f"Duration: {actual_duration:.3f}s")
+        print(f"Samples collected: {n_samples}")
+        print(f"Effective sample rate: {n_samples / actual_duration:.2f} Hz")
 
-        if abs(freqs_lock[idx]) < 5:
-            print("✓ Lock-in is LOCKED")
-        else:
-            print("✗ WARNING: Not locked! Peak should be at 0 Hz")
+        # Calculate buffer statistics
+        samples_per_buffer = n_samples / capture_count
+        time_per_buffer = actual_duration / capture_count
+        data_time_per_buffer = samples_per_buffer / self.nominal_sample_rate
+        gap_per_buffer = time_per_buffer - data_time_per_buffer
 
-        print(f"Samples: {len(all_X)}, Duration: {t[-1]:.3f}s")
-        print(f"Mean R: {np.mean(R):.6f} ± {np.std(R):.6f} V")
+        print(f"\nBuffer statistics:")
+        print(f"  Buffers captured: {capture_count}")
+        print(f"  Samples per buffer: {samples_per_buffer:.0f}")
+        print(f"  Data time per buffer: {data_time_per_buffer:.3f}s")
+        print(f"  Gap between buffers: {gap_per_buffer * 1000:.1f}ms")
+        print(
+            f"  Dead time: {gap_per_buffer * capture_count:.2f}s ({gap_per_buffer * capture_count / actual_duration * 100:.1f}%)")
+
+        print(f"\nMean R: {np.mean(R):.6f} ± {np.std(R):.6f} V")
         print(f"Mean X: {np.mean(all_X):.6f} ± {np.std(all_X):.6f} V")
         print(f"Mean Y: {np.mean(all_Y):.6f} ± {np.std(all_Y):.6f} V")
         print(f"Mean Theta: {np.mean(Theta):.6f} ± {np.std(Theta):.6f} rad")
 
-        expected_R = params['ref_amp'] / 2
-        if abs(np.mean(R) - expected_R) < 0.05:
-            print(f"✓ R matches expected {expected_R:.3f}V")
+        # Expected DC output for lock-in: A/2 for amplitude A
+        expected_R = params['ref_amp'] / 2.0  # NOT /sqrt(2) - that's RMS!
+        R_error = abs(np.mean(R) - expected_R)
+        R_ratio = np.mean(R) / expected_R
+
+        print(f"\nExpected R (lock-in DC): {expected_R:.3f}V")
+        print(f"Measured R: {np.mean(R):.3f}V")
+        print(f"Ratio: {R_ratio:.3f} ({R_ratio * 100:.1f}%)")
+
+        if R_error < 0.05:
+            print(f"✓ Magnitude matches expected (loopback test)")
+        elif abs(R_ratio - 1.0) < 0.1:
+            print(f"✓ Magnitude close to expected (within 10%)")
         else:
-            print(f"✗ R differs from expected {expected_R:.3f}V by {abs(np.mean(R) - expected_R):.3f}V")
+            print(f"✗ Magnitude differs by {R_error:.3f}V ({(R_ratio - 1) * 100:.1f}% error)")
+            if abs(freq_offset) > 5:
+                print(f"   Likely cause: lock-in NOT locked (freq offset = {freq_offset:.1f} Hz)")
+            else:
+                print(f"   Possible causes: loading, attenuation, or calibration issue")
 
         print("=" * 60)
 
-        # Create plots
+        # Create plots (same format as before)
         fig = plt.figure(figsize=(16, 10))
 
         # Reference signal
         ax1 = plt.subplot(3, 3, 1)
         n_periods = 5
-        n_plot = min(int(n_periods * actual_sample_rate / self.ref_freq), len(out1_raw))
+        n_plot = min(int(n_periods * self.nominal_sample_rate / self.ref_freq), len(out1_raw))
         ax1.plot(t_raw[:n_plot] * 1000, out1_raw[:n_plot], 'b-', linewidth=1)
         ax1.set_xlabel('Time (ms)')
         ax1.set_ylabel('OUT1 (V)')
@@ -352,10 +443,13 @@ class RedPitaya:
         # FFT
         ax3 = plt.subplot(3, 3, 3)
         ax3.semilogy(freqs_lock, psd_lock, label='Lock-in PSD')
-        ax3.axvline(0, color='r', linestyle='--', alpha=0.5, label='0 Hz')
+        ax3.axvline(0, color='r', linestyle='--', alpha=0.5, label='DC (0 Hz)')
+        if power_max_no_dc > 0.01 * dc_power:
+            ax3.axvline(freq_max_no_dc, color='orange', linestyle='--', alpha=0.7,
+                        label=f'Spurious ({freq_max_no_dc:.0f} Hz)')
         ax3.set_xlabel('Frequency (Hz)')
         ax3.set_ylabel('Power')
-        ax3.set_title('FFT Spectrum')
+        ax3.set_title('FFT of Demodulated Signal')
         ax3.legend()
         ax3.grid(True)
 
@@ -385,7 +479,7 @@ class RedPitaya:
         margin_Y = 5 * (np.max(all_Y) - np.min(all_Y))
         ax5.set_ylim(np.min(all_Y) - margin_Y, np.max(all_Y) + margin_Y)
 
-        # IQ plot (with corrected gain and offset)
+        # IQ plot
         ax6 = plt.subplot(3, 3, 6)
         ax6.plot(all_X, all_Y, 'g.', markersize=1, alpha=0.5)
         ax6.plot(np.mean(all_X), np.mean(all_Y), 'r+', markersize=15, markeredgewidth=2, label='Mean')
@@ -422,57 +516,58 @@ class RedPitaya:
         margin_Theta = 5 * (np.max(Theta) - np.min(Theta))
         ax8.set_ylim(np.min(Theta) - margin_Theta, np.max(Theta) + margin_Theta)
 
-        # Theta vs R
+
+        # Theta vs R (polar)
         ax9 = plt.subplot(3, 3, 9)
-        ax9.plot(Theta, R, 'g-', markersize=1, alpha=0.5)
+        ax9.plot(Theta, R, 'g.', markersize=1, alpha=0.5)
         ax9.plot(np.mean(Theta), np.mean(R), 'r+', markersize=15, markeredgewidth=2, label='Mean')
-        ax9.set_xlabel('Theta')
-        ax9.set_ylabel('R')
-        ax9.set_title('IQ Plot')
+        ax9.set_xlabel('Theta (rad)')
+        ax9.set_ylabel('R (V)')
+        ax9.set_title('Phase vs Magnitude')
         ax9.legend()
         ax9.grid(True)
-        ax9.axis('equal')
 
         plt.tight_layout()
 
+        # Save data and plots
         if params['save_file']:
             if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
 
             timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            # Save plot
             img_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.png')
             plt.savefig(img_path, dpi=150)
-            print(f"✓ Saved plot: {img_path}")
+            print(f"\n✓ Saved plot: {img_path}")
 
-            if params.get('save_timestamps', False):
-                data = np.column_stack((sample_timestamps, t, R, Theta, all_X, all_Y))
-                csv_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.csv')
+            # Save CSV data with index
+            data = np.column_stack((sample_index, t, R, Theta, all_X, all_Y))
+            csv_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.csv')
 
-                with open(csv_path, 'w', newline='') as f:
-                    f.write(f"# Mode: {self.input_mode}\n")
-                    f.write(f"# Gain: {self.input_gain_factor:.6f}\n")
-                    f.write(f"# X Offset: {self.x_offset:.6f} V\n")
-                    f.write(f"# Y Offset: {self.y_offset:.6f} V\n")
-                    f.write(f"# Ref Freq: {self.ref_freq} Hz\n")
-                    f.write(f"# Ref Amp: {params['ref_amp']} V\n")
-                    f.write(f"# Nominal Sample Rate: {self.sample_rate:.2f} Hz\n")
-                    f.write(f"# Actual Sample Rate: {actual_sample_rate:.2f} Hz\n")
-                    f.write("AbsoluteTimestamp,RelativeTime,R,Theta,X,Y\n")
-                    np.savetxt(f, data, delimiter=",", fmt='%.10f')
+            with open(csv_path, 'w', newline='') as f:
+                f.write(f"# Red Pitaya Lock-In Amplifier Data Logger\n")
+                f.write(f"# Mode: {self.input_mode}\n")
+                f.write(f"# Gain correction: {self.input_gain_factor:.6f}\n")
+                f.write(f"# X Offset: {self.x_offset:.6f} V\n")
+                f.write(f"# Y Offset: {self.y_offset:.6f} V\n")
+                f.write(f"# Reference frequency: {self.ref_freq} Hz\n")
+                f.write(f"# Reference amplitude: {params['ref_amp']} V\n")
+                f.write(f"# Filter bandwidth: {params.get('filter_bandwidth', 10)} Hz\n")
+                f.write(f"# Duration: {actual_duration:.3f} s\n")
+                f.write(f"# Samples: {n_samples}\n")
+                f.write(f"# Sample rate: {n_samples / actual_duration:.2f} Hz\n")
+                f.write(f"# NOTE: Index column allows sample-by-sample alignment with other devices\n")
+                f.write("Index,Time(s),R(V),Theta(rad),X(V),Y(V)\n")
+                np.savetxt(f, data, delimiter=",", fmt='%.10f')
 
-                print(f"✓ Saved data: {csv_path}")
-            else:
-                data = np.column_stack((t, R, Theta, all_X, all_Y))
-                csv_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.csv')
-                np.savetxt(csv_path, data, delimiter=",",
-                           header="Time,R,Theta,X,Y", comments='', fmt='%.6f')
-                print(f"✓ Saved data: {csv_path}")
+            print(f"✓ Saved data: {csv_path}")
         else:
             plt.show()
 
 
 if __name__ == '__main__':
-    rp = RedPitaya(
+    rp = RedPitayaLockInLogger(
         output_dir=OUTPUT_DIRECTORY,
         input_mode=INPUT_MODE,
         manual_gain=MANUAL_GAIN_FACTOR,
@@ -490,20 +585,19 @@ if __name__ == '__main__':
         'averaging_window': AVERAGING_WINDOW,
         'output_dir': OUTPUT_DIRECTORY,
         'save_file': SAVE_DATA,
-        'save_timestamps': SAVE_TIMESTAMPS,
         'auto_calibrate': AUTO_CALIBRATE,
         'calibration_time': CALIBRATION_TIME,
     }
 
     print("=" * 60)
-    print("RED PITAYA LOCK-IN AMPLIFIER")
+    print("RED PITAYA LOCK-IN DATA LOGGER")
     print("=" * 60)
     print(f"Reference: {REF_FREQUENCY} Hz @ {REF_AMPLITUDE}V")
-    print(f"Filter BW: {FILTER_BANDWIDTH} Hz")
-    print(f"Duration: {MEASUREMENT_TIME}s")
-    print(f"Input Mode: {INPUT_MODE}")
+    print(f"Filter bandwidth: {FILTER_BANDWIDTH} Hz")
+    print(f"Measurement time: {MEASUREMENT_TIME}s")
+    print(f"Input mode: {INPUT_MODE}")
     if INPUT_MODE.upper() == 'MANUAL':
-        print(f"Gain: {MANUAL_GAIN_FACTOR}x")
+        print(f"Manual gain: {MANUAL_GAIN_FACTOR}x")
     if X_OFFSET != 0.0 or Y_OFFSET != 0.0:
         print(f"Offsets: X={X_OFFSET:.6f}V, Y={Y_OFFSET:.6f}V")
     print("=" * 60)
