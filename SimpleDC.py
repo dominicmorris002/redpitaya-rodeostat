@@ -1,11 +1,8 @@
 """
 Red Pitaya DC Voltage Data Logger (Lock-In Style)
-
-Architecture matches the Lock-In Amplifier logger exactly.
-Uses scope buffers, rolling acquisition, gain/offset correction,
-and true timing for precise synchronization with lock-in data.
-
-Connect DC signal to IN1.
+Architecture matches Lock-In logger exactly.
+Single plot: Voltage vs Time
+Connect your DC signal to IN1.
 """
 
 from datetime import datetime
@@ -22,8 +19,7 @@ MEASUREMENT_TIME = 10.0  # seconds
 DECIMATION = 1024
 AVERAGING_WINDOW = 1
 
-# INPUT MODE: 'LV', 'HV', or 'MANUAL'
-INPUT_MODE = 'MANUAL'
+INPUT_MODE = 'MANUAL'  # 'LV', 'HV', or 'MANUAL'
 MANUAL_GAIN_FACTOR = 27.5760
 MANUAL_DC_OFFSET = -0.016379
 
@@ -61,9 +57,9 @@ class RedPitayaDCLogger:
             self.input_dc_offset = 0.0
             self.input_mode = "HV (±20V)"
         else:
-            self.input_mode = f"MANUAL ({manual_gain}x, offset {manual_offset}V)"
+            self.input_mode = f"MANUAL ({manual_gain}x, offset {manual_offset} V)"
 
-        # Scope setup (MATCHES LOCK-IN)
+        # Scope setup (matches lock-in style)
         self.scope.input1 = 'in1'
         self.scope.input2 = 'in1'
         self.scope.decimation = DECIMATION
@@ -73,7 +69,6 @@ class RedPitayaDCLogger:
 
         self.scope._start_acquisition_rolling_mode()
         self.scope.average = True
-
         self.nominal_sample_rate = 125e6 / self.scope.decimation
 
         print(f"DC Logger initialized")
@@ -84,9 +79,7 @@ class RedPitayaDCLogger:
         """Capture one scope buffer"""
         capture_time = time.time()
         self.scope.single()
-
         ch1 = np.array(self.scope._data_ch1_current)
-
         self.buffers.append(ch1)
         self.capture_times.append(capture_time)
 
@@ -103,24 +96,23 @@ class RedPitayaDCLogger:
 
         acquisition_end = time.time()
         actual_duration = acquisition_end - acquisition_start
-
         capture_count = len(self.buffers)
         print(f"✓ Captured {capture_count} buffers")
 
-        # Concatenate data
+        # Concatenate all buffers
         raw = np.concatenate(self.buffers)
 
-        # Apply corrections
+        # Apply manual gain/offset
         corrected = (raw - self.input_dc_offset) * self.input_gain_factor
 
-        # Optional averaging
-        if params.get('averaging_window', 1) > 1:
-            w = params['averaging_window']
+        # Apply averaging if requested
+        w = params.get('averaging_window', 1)
+        if w > 1:
             corrected = np.convolve(corrected, np.ones(w)/w, mode='valid')
             print(f"Applied {w}-sample moving average")
 
         n_samples = len(corrected)
-        t = np.arange(n_samples) / (n_samples / actual_duration)
+        t = np.linspace(0, actual_duration, n_samples)
 
         effective_sample_rate = n_samples / actual_duration
 
@@ -130,6 +122,7 @@ class RedPitayaDCLogger:
         buffer_spacing = actual_duration / capture_count
         dead_time = buffer_spacing - data_time_per_buffer
 
+        # Print summary
         print("\n" + "="*60)
         print("DC MEASUREMENT RESULTS")
         print("="*60)
@@ -139,7 +132,6 @@ class RedPitayaDCLogger:
         print(f"Effective sample rate: {effective_sample_rate:.2f} Hz")
         print(f"Mean voltage: {np.mean(corrected):.6f} V")
         print(f"Std dev: {np.std(corrected):.6f} V")
-
         print("\nBuffer statistics:")
         print(f"  Buffers: {capture_count}")
         print(f"  Samples per buffer: {samples_per_buffer:.0f}")
@@ -147,9 +139,9 @@ class RedPitayaDCLogger:
         print(f"  Gap per buffer: {dead_time*1000:.1f} ms")
         print("="*60)
 
-        # Plot
+        # Plot voltage vs time
         plt.figure(figsize=(14,6))
-        plt.plot(t, corrected, linewidth=0.6)
+        plt.plot(t, corrected, linewidth=0.8)
         plt.axhline(np.mean(corrected), color='r', linestyle='--',
                     label=f"Mean {np.mean(corrected):.6f} V")
         plt.xlabel("Time (s)")
@@ -159,20 +151,18 @@ class RedPitayaDCLogger:
         plt.grid(True)
         plt.tight_layout()
 
-        # Save
+        # Save figure and CSV
         if params['save_file']:
             if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            png_path = os.path.join(self.output_dir, f"dc_voltage_{ts}.png")
+            plt.draw()  # Ensure figure is fully rendered
+            plt.savefig(png_path, dpi=150)
+            print(f"✓ Saved plot to {png_path}")
 
-            plt.savefig(os.path.join(self.output_dir,
-                        f"dc_results_{ts}.png"), dpi=150)
-
-            data = np.column_stack((t, corrected))
-            csv_path = os.path.join(self.output_dir,
-                        f"dc_results_{ts}.csv")
-
+            csv_path = os.path.join(self.output_dir, f"dc_voltage_{ts}.csv")
             with open(csv_path, 'w') as f:
                 f.write("# Red Pitaya DC Logger\n")
                 f.write(f"# Mode: {self.input_mode}\n")
@@ -181,15 +171,13 @@ class RedPitayaDCLogger:
                 f.write(f"# Duration: {actual_duration:.6f}\n")
                 f.write(f"# Sample rate: {effective_sample_rate:.3f} Hz\n")
                 f.write("Time(s),Voltage(V)\n")
-                np.savetxt(f, data, delimiter=",", fmt="%.10f")
-
-            print(f"\n✓ Saved data to {csv_path}")
+                np.savetxt(f, np.column_stack((t, corrected)), delimiter=",", fmt="%.10f")
+            print(f"✓ Saved data to {csv_path}")
 
         plt.show()
 
 
 if __name__ == "__main__":
-
     rp = RedPitayaDCLogger(
         output_dir=OUTPUT_DIRECTORY,
         input_mode=INPUT_MODE,
