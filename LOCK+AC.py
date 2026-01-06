@@ -17,15 +17,15 @@ from pyrpl import Pyrpl
 # MEASUREMENT PARAMETERS
 # ============================================================
 REF_FREQUENCY = 500  # Hz
-REF_AMPLITUDE = 1  # V
+REF_AMPLITUDE = 0.5  # V
 OUTPUT_CHANNEL = 'out1'
 PHASE_OFFSET = 0  # degrees
 MEASUREMENT_TIME = 30.0  # seconds
 
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
-INPUT_MODE = 'AUTO'
-AUTOLAB_GAIN = 0.0
-MANUAL_GAIN_FACTOR = 1.0815 + AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'
+INPUT_MODE = 'MANUAL'
+AUTOLAB_GAIN = 1  #Based on Autolab "Current Scale" if Scale = 1mA : Set to 1e-3
+MANUAL_GAIN_FACTOR = 1.0815 * AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL' 1.0815
 
 # OFFSET CORRECTION
 X_OFFSET = 0.0  # Volts - subtracted from X values
@@ -133,7 +133,7 @@ class RedPitayaLockInLogger:
             bandwidth=10,
             gain=0.0,
             phase=0,
-            acbandwidth=0,
+            acbandwidth=0.0,
             amplitude=cal_amp,
             input='in1',
             output_direct='out1',
@@ -251,19 +251,15 @@ class RedPitayaLockInLogger:
         time.sleep(0.5)
 
         acquisition_start_time = time.time()
-        capture_count = 0
         print(f"Started: {datetime.fromtimestamp(acquisition_start_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
 
         # Data collection loop
         loop_start = time.time()
         while (time.time() - loop_start) < params['timeout']:
             self.capture_lockin()
-            capture_count += 1
 
         acquisition_end_time = time.time()
         actual_duration = acquisition_end_time - acquisition_start_time
-
-        print(f"✓ Captured {capture_count} scope buffers")
 
         # Concatenate all captured data
         all_X_raw = np.concatenate(self.lockin_X)
@@ -284,10 +280,9 @@ class RedPitayaLockInLogger:
         R = np.sqrt(all_X ** 2 + all_Y ** 2)
         Theta = np.arctan2(all_Y, all_X)
 
-        # Create time vector and sample index
+        # Create time vector
         n_samples = len(all_X)
-        sample_index = np.arange(n_samples)
-        t = sample_index / (n_samples / actual_duration)
+        t = np.linspace(0, actual_duration, n_samples)
 
         # Get raw signals for diagnostic plots
         self.scope.input1 = 'out1'
@@ -311,60 +306,36 @@ class RedPitayaLockInLogger:
         freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, t[1] - t[0]))
         psd_lock = (np.abs(IQfft) ** 2) / (len(t) * np.sum(win ** 2))
 
-        # Find the DC peak (should be the strongest)
-        idx_dc = np.argmin(np.abs(freqs_lock))  # Closest to 0 Hz
-        dc_power = psd_lock[idx_dc]
+        # Find ALL significant peaks, not just the maximum
+        idx_max = np.argmax(psd_lock)
+        freq_offset = freqs_lock[idx_max]
 
-        # Find ALL significant peaks in the FULL spectrum
-        idx_max_global = np.argmax(psd_lock)
-        freq_max_global = freqs_lock[idx_max_global]
-
-        # Find peaks EXCLUDING DC region (±50 Hz)
-        dc_exclusion_mask = np.abs(freqs_lock) > 50
-        psd_no_dc = psd_lock.copy()
-        psd_no_dc[~dc_exclusion_mask] = 0
-
-        idx_max_no_dc = np.argmax(psd_no_dc)
-        freq_max_no_dc = freqs_lock[idx_max_no_dc]
-        power_max_no_dc = psd_no_dc[idx_max_no_dc]
-
-        # Find top peaks above threshold
-        threshold = 0.01 * dc_power  # 1% of DC power
+        # Find peaks above threshold
+        threshold = 0.1 * np.max(psd_lock)
         peak_indices = np.where(psd_lock > threshold)[0]
         peak_freqs = freqs_lock[peak_indices]
         peak_powers = psd_lock[peak_indices]
 
         # Sort by power
         sort_idx = np.argsort(peak_powers)[::-1]
-        top_10_freqs = peak_freqs[sort_idx[:min(10, len(peak_freqs))]]
-        top_10_powers = peak_powers[sort_idx[:min(10, len(peak_powers))]]
+        top_5_freqs = peak_freqs[sort_idx[:5]]
+        top_5_powers = peak_powers[sort_idx[:5]]
 
         print(f"\n⚠ FFT ANALYSIS:")
-        print(f"DC peak (0 Hz): {dc_power:.2e}")
-        print(f"Largest non-DC peak: {freq_max_no_dc:+.2f} Hz (power: {power_max_no_dc:.2e})")
-        print(f"Ratio (non-DC/DC): {power_max_no_dc / dc_power * 100:.1f}%")
+        print(f"Maximum peak at: {freq_offset:.2f} Hz (power: {psd_lock[idx_max]:.2e})")
+        print(f"\nTop 5 frequency peaks:")
+        for i, (f, p) in enumerate(zip(top_5_freqs, top_5_powers)):
+            print(f"  {i + 1}. {f:+8.2f} Hz (power: {p:.2e})")
 
-        print(f"\nTop 10 frequency peaks:")
-        for i, (f, p) in enumerate(zip(top_10_freqs, top_10_powers)):
-            marker = " ← DC" if abs(f) < 5 else ""
-            marker += " ⚠ SPURIOUS!" if abs(f) > 50 and p > 0.01 * dc_power else ""
-            print(f"  {i + 1}. {f:+8.2f} Hz (power: {p:.2e}){marker}")
-
-        # Determine lock status
-        if power_max_no_dc > 0.1 * dc_power:  # Non-DC peak > 10% of DC
-            print(f"\n✗ WARNING: Large spurious peak at {freq_max_no_dc:+.2f} Hz!")
-            print(f"   This peak is {power_max_no_dc / dc_power * 100:.1f}% of DC power")
-            print(f"   Possible causes:")
-            print(f"     - Frequency offset/drift")
-            print(f"     - Sampling artifacts")
-            print(f"     - Aliasing from decimation")
-            freq_offset = freq_max_no_dc  # Use this for later checks
-        elif abs(freq_max_global) < 5:
-            print(f"\n✓ Spectrum dominated by DC (properly locked)")
-            freq_offset = 0
+        if abs(freq_offset) > 5:
+            print(f"\n✗ WARNING: Lock-in is NOT locked properly!")
+            print(f"   Frequency offset: {freq_offset:.1f} Hz from DC")
+            print(f"   This suggests:")
+            print(f"     - Reference freq ≠ Input freq by {abs(freq_offset):.1f} Hz")
+            print(f"     - OR frequency drift/instability")
+            print(f"     - OR PyRPL demodulation issue")
         else:
-            print(f"\n⚠ Unexpected spectrum structure")
-            freq_offset = freq_max_global
+            print(f"\n✓ Peak is at DC (properly demodulated)")
 
         # Print results
         print("\n" + "=" * 60)
@@ -377,20 +348,17 @@ class RedPitayaLockInLogger:
         print(f"Duration: {actual_duration:.3f}s")
         print(f"Samples collected: {n_samples}")
         print(f"Effective sample rate: {n_samples / actual_duration:.2f} Hz")
+        print(f"\nFFT peak at: {freq_offset:.2f} Hz (demodulated signal, should be ~0 Hz)")
 
-        # Calculate buffer statistics
-        samples_per_buffer = n_samples / capture_count
-        time_per_buffer = actual_duration / capture_count
-        data_time_per_buffer = samples_per_buffer / self.nominal_sample_rate
-        gap_per_buffer = time_per_buffer - data_time_per_buffer
-
-        print(f"\nBuffer statistics:")
-        print(f"  Buffers captured: {capture_count}")
-        print(f"  Samples per buffer: {samples_per_buffer:.0f}")
-        print(f"  Data time per buffer: {data_time_per_buffer:.3f}s")
-        print(f"  Gap between buffers: {gap_per_buffer * 1000:.1f}ms")
-        print(
-            f"  Dead time: {gap_per_buffer * capture_count:.2f}s ({gap_per_buffer * capture_count / actual_duration * 100:.1f}%)")
+        if abs(freq_offset) < 5:
+            print("✓ Lock-in output is stable at DC")
+        else:
+            print(f"✗ WARNING: NOT LOCKED! Frequency offset = {freq_offset:.1f} Hz")
+            print(f"   Expected: peak at 0 Hz (DC)")
+            print(f"   Possible causes:")
+            print(f"     - Reference frequency mismatch")
+            print(f"     - PyRPL not generating correct frequency")
+            print(f"     - Input signal frequency different from {self.ref_freq} Hz")
 
         print(f"\nMean R: {np.mean(R):.6f} ± {np.std(R):.6f} V")
         print(f"Mean X: {np.mean(all_X):.6f} ± {np.std(all_X):.6f} V")
@@ -443,10 +411,7 @@ class RedPitayaLockInLogger:
         # FFT
         ax3 = plt.subplot(3, 3, 3)
         ax3.semilogy(freqs_lock, psd_lock, label='Lock-in PSD')
-        ax3.axvline(0, color='r', linestyle='--', alpha=0.5, label='DC (0 Hz)')
-        if power_max_no_dc > 0.01 * dc_power:
-            ax3.axvline(freq_max_no_dc, color='orange', linestyle='--', alpha=0.7,
-                        label=f'Spurious ({freq_max_no_dc:.0f} Hz)')
+        
         ax3.set_xlabel('Frequency (Hz)')
         ax3.set_ylabel('Power')
         ax3.set_title('FFT of Demodulated Signal')
@@ -516,7 +481,6 @@ class RedPitayaLockInLogger:
         margin_Theta = 5 * (np.max(Theta) - np.min(Theta))
         ax8.set_ylim(np.min(Theta) - margin_Theta, np.max(Theta) + margin_Theta)
 
-
         # Theta vs R (polar)
         ax9 = plt.subplot(3, 3, 9)
         ax9.plot(Theta, R, 'g.', markersize=1, alpha=0.5)
@@ -541,8 +505,8 @@ class RedPitayaLockInLogger:
             plt.savefig(img_path, dpi=150)
             print(f"\n✓ Saved plot: {img_path}")
 
-            # Save CSV data with index
-            data = np.column_stack((sample_index, t, R, Theta, all_X, all_Y))
+            # Save CSV data
+            data = np.column_stack((t, R, Theta, all_X, all_Y))
             csv_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.csv')
 
             with open(csv_path, 'w', newline='') as f:
@@ -556,9 +520,7 @@ class RedPitayaLockInLogger:
                 f.write(f"# Filter bandwidth: {params.get('filter_bandwidth', 10)} Hz\n")
                 f.write(f"# Duration: {actual_duration:.3f} s\n")
                 f.write(f"# Samples: {n_samples}\n")
-                f.write(f"# Sample rate: {n_samples / actual_duration:.2f} Hz\n")
-                f.write(f"# NOTE: Index column allows sample-by-sample alignment with other devices\n")
-                f.write("Index,Time(s),R(V),Theta(rad),X(V),Y(V)\n")
+                f.write("Time(s),R(V),Theta(rad),X(V),Y(V)\n")
                 np.savetxt(f, data, delimiter=",", fmt='%.10f')
 
             print(f"✓ Saved data: {csv_path}")
