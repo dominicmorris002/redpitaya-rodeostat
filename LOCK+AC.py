@@ -24,7 +24,7 @@ MEASUREMENT_TIME = 10.0  # seconds
 
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'MANUAL'
-AUTOLAB_GAIN = 1e-3  # Based on Autolab "Current Scale" if Scale = 1mA : Set to 1e-3
+AUTOLAB_GAIN = 1  # Based on Autolab "Current Scale" if Scale = 1mA : Set to 1e-3
 MANUAL_GAIN_FACTOR = 28.78857669 * AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'
 MANUAL_DC_OFFSET = -0.011800  # Only used if INPUT_MODE = 'MANUAL'
 
@@ -467,7 +467,7 @@ class RedPitayaLockInLogger:
         # X vs Time
         ax4 = plt.subplot(3, 3, 4)
         ax4.plot(t, all_X, 'b-', linewidth=0.5)
-        ax4.axhline(np.mean(all_X), color='r', linestyle='--', label=f'Mean: {np.mean(all_X):.4f}V')
+        ax4.axhline(np.mean(all_X), color='r', linestyle='--', label=f'Mean: {np.mean(all_X):.9f}V')
         ax4.set_xlabel('Time (s)')
         ax4.set_ylabel('X (V)')
         ax4.set_title('In-phase (X) - Offset Corrected')
@@ -480,7 +480,7 @@ class RedPitayaLockInLogger:
         # Y vs Time
         ax5 = plt.subplot(3, 3, 5)
         ax5.plot(t, all_Y, 'r-', linewidth=0.5)
-        ax5.axhline(np.mean(all_Y), color='b', linestyle='--', label=f'Mean: {np.mean(all_Y):.4f}V')
+        ax5.axhline(np.mean(all_Y), color='b', linestyle='--', label=f'Mean: {np.mean(all_Y):.9f}V')
         ax5.set_xlabel('Time (s)')
         ax5.set_ylabel('Y (V)')
         ax5.set_title('Quadrature (Y) - Offset Corrected')
@@ -503,21 +503,21 @@ class RedPitayaLockInLogger:
 
         # R vs Time
         ax7 = plt.subplot(3, 3, 7)
-        ax7.plot(t, R, 'm-', linewidth=0.5)
-        ax7.axhline(np.mean(R), color='b', linestyle='--', label=f'Mean: {np.mean(R):.4f}V')
+        ax7.plot(t, R * 1e6, 'm-', linewidth=0.5)
+        ax7.axhline(np.mean(R) * 1e6, color='b', linestyle='--', label=f'Mean: {np.mean(R) * 1e6:.6f}μA')
         ax7.set_xlabel('Time (s)')
-        ax7.set_ylabel('R (V)')
+        ax7.set_ylabel('R (μA)')
         ax7.set_title('Magnitude (R)')
         ax7.legend()
         ax7.grid(True)
         ax7.set_xlim(t[0], t[-1])
-        margin_R = 5 * (np.max(R) - np.min(R))
-        ax7.set_ylim(np.min(R) - margin_R, np.max(R) + margin_R)
+        margin_R = 5 * (np.max(R * 1e6) - np.min(R * 1e6))
+        ax7.set_ylim(np.min(R * 1e6) - margin_R, np.max(R * 1e6) + margin_R)
 
         # Theta vs Time
         ax8 = plt.subplot(3, 3, 8)
         ax8.plot(t, Theta, 'c-', linewidth=0.5)
-        ax8.axhline(np.mean(Theta), color='r', linestyle='--', label=f'Mean: {np.mean(Theta):.4f} rad')
+        ax8.axhline(np.mean(Theta), color='r', linestyle='--', label=f'Mean: {np.mean(Theta):.6f} rad')
         ax8.set_xlabel('Time (s)')
         ax8.set_ylabel('Theta (rad)')
         ax8.set_title('Phase (Theta)')
