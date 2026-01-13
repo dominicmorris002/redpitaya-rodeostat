@@ -24,7 +24,7 @@ MEASUREMENT_TIME = 10.0  # seconds
 
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'MANUAL'
-AUTOLAB_GAIN = 1  # Based on Autolab "Current Scale" if Scale = 1mA : Set to 1e-3
+AUTOLAB_GAIN = 1e-6  # Based on Autolab "Current Scale" if Scale = 1mA : Set to 1e-3
 MANUAL_GAIN_FACTOR = 28.78857669 * AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'
 MANUAL_DC_OFFSET = -0.011800  # Only used if INPUT_MODE = 'MANUAL'
 
@@ -434,11 +434,14 @@ class RedPitayaLockInLogger:
         # Create plots
         fig = plt.figure(figsize=(16, 10))
 
+        # Compute actual time vector for the raw signals
+        t_raw_corrected = np.linspace(0, len(out1_raw) / self.nominal_sample_rate, len(out1_raw))
+
         # Reference signal
         ax1 = plt.subplot(3, 3, 1)
         n_periods = 5
         n_plot = min(int(n_periods * self.nominal_sample_rate / self.ref_freq), len(out1_raw))
-        ax1.plot(t_raw[:n_plot] * 1000, out1_raw[:n_plot], 'b-', linewidth=1)
+        ax1.plot(t_raw_corrected[:n_plot] * 1000, out1_raw[:n_plot], 'b-', linewidth=1)
         ax1.set_xlabel('Time (ms)')
         ax1.set_ylabel('OUT1 (V)')
         ax1.set_title(f'Reference @ {self.ref_freq} Hz')
@@ -446,7 +449,7 @@ class RedPitayaLockInLogger:
 
         # Input signal (corrected)
         ax2 = plt.subplot(3, 3, 2)
-        ax2.plot(t_raw[:n_plot] * 1000, in1_raw[:n_plot], 'r-', linewidth=1)
+        ax2.plot(t_raw_corrected[:n_plot] * 1000, in1_raw[:n_plot], 'r-', linewidth=1)
         ax2.set_xlabel('Time (ms)')
         ax2.set_ylabel('IN1 (V, corrected)')
         ax2.set_title(f'Input - {self.input_mode}')
