@@ -24,9 +24,9 @@ MEASUREMENT_TIME = 10.0  # seconds
 
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'MANUAL'
-AUTOLAB_GAIN = 1  # Based on Autolab "Current Scale" if Scale = 1mA : Set to 1e-3
-MANUAL_GAIN_FACTOR = 27.7689 * AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'
-MANUAL_DC_OFFSET = -0.011277  # Only used if INPUT_MODE = 'MANUAL'
+AUTOLAB_GAIN = 1e-3  # Based on Autolab "Current Scale" if Scale = 1mA : Set to 1e-3
+MANUAL_GAIN_FACTOR = 28.78857669 * AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'
+MANUAL_DC_OFFSET = -0.011800  # Only used if INPUT_MODE = 'MANUAL'
 
 FILTER_BANDWIDTH = 10  # Hz
 AVERAGING_WINDOW = 1  # samples (moving average on logged data)
