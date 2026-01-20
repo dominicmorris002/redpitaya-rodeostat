@@ -1,8 +1,14 @@
 """
-Red Pitaya DC Voltage Data Logger (Lock-In Style)
+Red Pitaya DC Voltage Data Logger 
 Architecture matches Lock-In logger exactly.
 Single plot: Voltage vs Time
 Connect your DC signal to IN1.
+
+To do AC CV use the startboth file
+
+Have a Great Day ;)
+
+
 """
 
 from datetime import datetime
@@ -15,14 +21,14 @@ from pyrpl import Pyrpl
 # ============================================================
 # MEASUREMENT PARAMETERS
 # ============================================================
-MEASUREMENT_TIME = 10.0  # seconds
+MEASUREMENT_TIME = 12.0  # seconds
 DECIMATION = 1024
-AVERAGING_WINDOW = 1
+AVERAGING_WINDOW = 10
 
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'MANUAL'
-MANUAL_GAIN_FACTOR = 27.4405
-MANUAL_DC_OFFSET = -0.016325
+MANUAL_GAIN_FACTOR = 28.93002007*-1   #28.93002007*-1
+MANUAL_DC_OFFSET = -0.016903         #-0.016903
 
 AUTO_CALIBRATE = True  # Only used if INPUT_MODE = 'AUTO'
 CALIBRATION_TIME = 2.0  # seconds
@@ -320,7 +326,7 @@ class RedPitayaDCLogger:
                 np.savetxt(f, np.column_stack((sample_index, t, corrected)), delimiter=",", fmt="%.10f")
             print(f"✓ Saved data: {csv_path}")
 
-        
+
 
 
 if __name__ == "__main__":
