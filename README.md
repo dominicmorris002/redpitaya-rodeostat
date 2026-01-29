@@ -15,22 +15,22 @@ There are three main programs:
    - Manual control of the Rodeostat
 
 2. **Red Pitayas**
-   Read input/output with a basic oscilloscope
-   Lock-In Amplifier using PyRPL and AC Signal Generator
-   Measure DC steps from the potentiostat faster than Rodeostat
+   - Read input/output with a basic oscilloscope
+   - Lock-In Amplifier using PyRPL and AC Signal Generator
+   - Measure DC steps from the potentiostat faster than Rodeostat
 
 3. **Both Red Pitayas together**
-   Run both Red Pitayas at the same time to measure DC Ramp and Lock-On Amplifier Response
-   Do AC with DC bias experiments (ACCV)
+   - Run both Red Pitayas at the same time to measure DC Ramp and Lock-On Amplifier Response
+   - Do AC with DC bias experiments (ACCV)
 
 
 
 Features
 
-Saves data as **CSV files**
-Plots using **Matplotlib**
-Uses a custom **PyRPL controller** with its own `scope.yaml`
-Easy to read console output
+- Saves data as **CSV files**
+- Plots using **Matplotlib**
+- Uses a custom **PyRPL controller** with its own `scope.yaml`
+- Easy to read console output
 
 ---------------------------------------------------------------------------------------------------
 
