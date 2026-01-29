@@ -1,14 +1,144 @@
-This Project is for creating a AC Cyclic Voltametry System using the Rodeostat Potentiostat and Two Red Pitaya Devices,
+# AC Cyclic Voltammetry System - Rodeostat & Red Pitaya 
 
-It has three things for Python 3.8 using Pycharm, 
+Hey! This project is for making an **AC Cyclic Voltammetry (ACCV) setup** using a Rodeostat potentiostat and two Red Pitaya devices.  
 
-1) A program to do Cyclic Voltammetry on A Rodeostat and A program for manual control of the Rodeostat
-2) A program to control a Red Pitaya to output a Ac Wave and Measure the Input and Output through basic Oscope readings as well as a Lock On Amplifier, A program to Control a RedPitaya to measure DC Step of The potentiostat for faster sampling then the Rodeostat Provides.
-3) A program to control both the Red Pitayas Simultenously to run in conjuction with the Rodeostat to do an AC with DC Biased Experiment simultaneously for AC Cylic Voltametry (ACCV)
+It’s all written in Python 3.8 and tested in PyCharm.
 
-These programs use CSV files to save their Data and plot it in matlib plot as well as a custom PyRPL controller with its own built in scope.yaml file.
+---
 
-I HIGHLY Recommend if you are going to use this you dowload the full zipped file I have provided and Use Python 3.8 and download the dependencies needed. You may notice that the venv. file you need to run this code is custom modified so you will need to download the virtual enviorment from here or fix it yourself.
+Whats in here?
 
-Have a great day :)
--Dominic
+There are three main programs:
+
+1. **Rodeostat Potentiostat**
+   Do regular Cyclic Voltammetry (CV)
+   Manual control of the Rodeostat
+
+2. **Red Pitayas**
+   Read input/output with a basic oscilloscope
+   Lock-In Amplifier using PyRPL and AC Signal Generator
+   Measure DC steps from the potentiostat faster than Rodeostat
+
+3. **Both Red Pitayas together**
+   Run both Red Pitayas at the same time to measure DC Ramp and Lock-On Amplifier Response
+   Do AC with DC bias experiments (ACCV)
+
+
+
+Features
+
+Saves data as **CSV files**
+Plots using **Matplotlib**
+Uses a custom **PyRPL controller** with its own `scope.yaml`
+Easy to read console output
+
+---------------------------------------------------------------------------------------------------
+
+## Notes
+
+I recommend downloading each of these before running.
+
+# Python version
+python==3.8.10
+
+# Core packages
+numpy==1.23.5
+pandas==2.0.3
+matplotlib==3.7.5
+pyqtgraph==0.11.1
+scipy==1.10.1
+PyDAQmx==1.4.7
+
+# PyRPL and Red Pitaya
+pyrpl==0.9.7.0
+rpds-py==0.20.1
+
+# Potentiostat
+potentiostat==0.0.4
+
+# GUI / Qt dependencies
+PyQt5==5.15.9
+PyQt5-Qt5==5.15.2
+PyQt5_sip==12.15.0
+QtPy==1.9.0
+qasync==0.28.0
+Quamash==0.6.1
+
+# Jupyter / Notebook stuff (optional)
+ipython==8.12.3
+jupyter_client==8.6.3
+jupyter_core==5.8.1
+nbclient==0.10.1
+nbconvert==7.16.6
+nbformat==5.10.4
+matplotlib-inline==0.1.7
+
+# Misc utilities
+asttokens==3.0.0
+attrs==25.3.0
+backcall==0.2.0
+bcrypt==5.0.0
+beautifulsoup4==4.14.3
+bleach==6.1.0
+cffi==1.17.1
+colorama==0.4.6
+contourpy==1.1.1
+cryptography==46.0.3
+cycler==0.12.1
+decorator==5.2.1
+defusedxml==0.7.1
+executing==2.2.1
+fastjsonschema==2.21.2
+fonttools==4.57.0
+importlib_metadata==8.5.0
+importlib_resources==6.4.5
+jedi==0.19.2
+Jinja2==3.1.6
+jsonschema==4.23.0
+jsonschema-specifications==2023.12.1
+kiwisolver==1.4.7
+MarkupSafe==2.1.5
+mistune==3.2.0
+nose==1.3.7
+packaging==25.0
+pandocfilters==1.5.1
+paramiko==3.5.1
+parso==0.8.5
+pickleshare==0.7.5
+pillow==10.4.0
+pip==25.0.1
+pkgutil_resolve_name==1.3.10
+platformdirs==4.3.6
+progressbar2==4.5.0
+prompt_toolkit==3.0.52
+pure_eval==0.2.3
+pycparser==2.23
+PyNaCl==1.6.0
+pyparsing==3.1.4
+pyserial==3.5
+python-dateutil==2.9.0.post0
+python-utils==3.8.2
+pytz==2025.2
+pywin32==311
+PyYAML==6.0.3
+pyzmq==27.1.0
+referencing==0.35.1
+scp==0.15.0
+setuptools==75.3.2
+six==1.17.0
+soupsieve==2.7
+stack-data==0.6.3
+tinycss2==1.2.1
+tornado==6.4.2
+traitlets==5.14.3
+typing_extensions==4.13.2
+tzdata==2025.2
+wcwidth==0.2.14
+webencodings==0.5.1
+wheel==0.45.1
+zipp==3.20.2
+
+
+
+Have a great day!   
+— Dominic Morris :)
