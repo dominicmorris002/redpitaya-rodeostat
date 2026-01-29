@@ -11,8 +11,8 @@ Whats in here?
 There are three main programs:
 
 1. **Rodeostat Potentiostat**
-   Do regular Cyclic Voltammetry (CV)
-   Manual control of the Rodeostat
+   -Do regular Cyclic Voltammetry (CV)
+   -Manual control of the Rodeostat
 
 2. **Red Pitayas**
    Read input/output with a basic oscilloscope
