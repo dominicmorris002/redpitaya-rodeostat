@@ -1,8 +1,8 @@
-# AC Cyclic Voltammetry System - Rodeostat & Red Pitaya 
+# Mobile AC Cyclic Voltammetry System Research - Rodeostat & Red Pitaya 
 
 Hey! This project is for making an **AC Cyclic Voltammetry (ACCV) setup** using a Rodeostat potentiostat and two Red Pitaya devices.  
 
-It’s all written in Python 3.8 and tested in PyCharm.
+It’s all written in Python 3.8 and tested in PyCharm. PyRPL is used in this project but will eventually have a custom modified FPGA to allow the Red Pitaya to act as a comerical Lock In Amplifier using continous data streaming.
 
 ---
 
