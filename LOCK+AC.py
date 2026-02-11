@@ -60,7 +60,7 @@ class RedPitayaLockInLogger:
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
     def __init__(self, output_dir='test_data', input_mode='AUTO', manual_gain=1.0, manual_offset=0.0):
-        self.rp = Pyrpl(config='lockin_config5', hostname='rp-f073ce.local')
+        self.rp = Pyrpl(config='lockin_config10', hostname='rp-f073ce.local')
         self.output_dir = output_dir
         self.rp_modules = self.rp.rp
         self.lockin = self.rp_modules.iq2
