@@ -1,11 +1,7 @@
 """
-Red Pitaya Lock-In Amplifier - FAST ACQUISITION VERSIONS
+Red Pitaya Lock-In Amplifier
 
-Three acquisition modes to test:
-1. SINGLE_SHOT - Your current method (baseline)
-2. CONTINUOUS - Uses scope.continuous() for potentially faster acquisition
-3. CURVE_BUFFER - Uses Red Pitaya's internal buffer (fastest, but less flexible)
-
+Uses PyRPL's built-in lock-in (iq2 and iq2_2 module) to log data of X(In-Phase) and Y(Out-Phase).
 For testing: connect OUT1 to IN1 with a cable.
 Supports AUTO, LV, HV, or MANUAL gain modes.
 Phase is in degrees!
@@ -24,7 +20,7 @@ from pyrpl import Pyrpl
 # MEASUREMENT PARAMETERS
 # ============================================================
 REF_FREQUENCY = 500  # Hz
-REF_AMPLITUDE = 1.0  # V
+REF_AMPLITUDE = 0.2  # V
 OUTPUT_CHANNEL = 'out1'
 PHASE_OFFSET = 0  # degrees
 MEASUREMENT_TIME = 12  # seconds
@@ -33,23 +29,20 @@ MEASUREMENT_TIME = 12  # seconds
 INPUT_MODE = 'MANUAL'
 AUTOLAB_GAIN = 1  # Based on Autolab "Current Scale" if Scale = 1mA : Set to 1e-3
 MANUAL_GAIN_FACTOR = 1 * AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'
-MANUAL_DC_OFFSET = 0  # Only used if INPUT_MODE = 'MANUAL'
+MANUAL_DC_OFFSET = 0   # Only used if INPUT_MODE = 'MANUAL'
 
-FILTER_BANDWIDTH = 100  # Hz
+FILTER_BANDWIDTH = 10  # Hz
 AVERAGING_WINDOW = 1  # samples (moving average on logged data)
-DECIMATION = 8  # Try: 1, 8, 64, 1024, 8192, 65536
+DECIMATION = 1024
 
 SAVE_DATA = True
 OUTPUT_DIRECTORY = 'test_data'
 
-AUTO_CALIBRATE = False  # Only used if INPUT_MODE = 'AUTO'
+AUTO_CALIBRATE = True  # Only used if INPUT_MODE = 'AUTO'
 CALIBRATION_TIME = 2.0  # seconds
 
-# ============================================================
-# ACQUISITION MODE SELECTION
-# Choose one: 'SINGLE_SHOT', 'CONTINUOUS', or 'CURVE_BUFFER'
-# ============================================================
-ACQUISITION_MODE = 'CONTINUOUS'
+# ACQUISITION MODE: 'SINGLE_SHOT' or 'CONTINUOUS'
+ACQUISITION_MODE = 'SINGLE_SHOT'
 # ============================================================
 
 START_TIME_FILE = "start_time.txt"
@@ -65,7 +58,7 @@ except FileNotFoundError:
 
 
 class RedPitayaLockInLogger:
-    """Data logger for PyRPL's built-in lock-in with multiple acquisition modes"""
+    """Data logger for PyRPL's built-in lock-in"""
 
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
@@ -260,11 +253,8 @@ class RedPitayaLockInLogger:
         print(f"Gain correction: {self.input_gain_factor:.4f}x")
         print(f"DC offset correction: {self.input_dc_offset:.6f}V")
 
-    # ============================================================
-    # OPTION 1: SINGLE SHOT MODE (Your current method)
-    # ============================================================
-    def capture_lockin_single_shot(self):
-        """Grab one buffer of lock-in data using single() mode"""
+    def capture_lockin(self):
+        """Grab one buffer of lock-in data"""
         capture_time = time.time()
         self.scope.single()
 
@@ -277,14 +267,10 @@ class RedPitayaLockInLogger:
 
         return ch1, ch2
 
-    # ============================================================
-    # OPTION 2: CONTINUOUS MODE (Potentially faster)
-    # ============================================================
     def capture_lockin_continuous(self):
-        """Grab lock-in data using continuous mode"""
+        """Grab lock-in data in continuous mode (no blocking single() call)"""
         capture_time = time.time()
 
-        # Read current data (scope is already running in continuous mode)
         ch1 = np.array(self.scope._data_ch1_current)  # X from lock-in
         ch2 = np.array(self.scope._data_ch2_current)  # Y from lock-in
 
@@ -293,40 +279,6 @@ class RedPitayaLockInLogger:
         self.capture_times.append(capture_time)
 
         return ch1, ch2
-
-    # ============================================================
-    # OPTION 3: CURVE BUFFER MODE (Fastest - collects internally)
-    # ============================================================
-    def acquire_with_curve_buffer(self, params):
-        """Use Red Pitaya's curve buffer for fastest acquisition"""
-        print("Using CURVE BUFFER mode - acquiring all data internally...")
-
-        curve = self.rp_modules.curve
-
-        # Calculate how many points we can get
-        duration = params['timeout']
-        sample_rate = self.nominal_sample_rate
-
-        print(f"Curve buffer acquiring for {duration}s at {sample_rate / 1e3:.1f} kHz...")
-
-        # Setup curve to record both lock-in outputs
-        curve.setup(
-            duration=duration,
-            trigger_source='immediately',
-            input1='iq2',  # X component
-            input2='iq2_2',  # Y component
-        )
-
-        # Wait for acquisition to complete
-        time.sleep(duration + 0.5)
-
-        # Get the data
-        all_X_raw = np.array(curve.data_ch1)
-        all_Y_raw = np.array(curve.data_ch2)
-
-        print(f"✓ Curve buffer collected {len(all_X_raw)} samples")
-
-        return all_X_raw, all_Y_raw
 
     def run(self, params):
         """Main acquisition loop"""
@@ -346,53 +298,33 @@ class RedPitayaLockInLogger:
 
         acquisition_start_time = time.time()
         capture_count = 0
+        print(f"Started: {datetime.fromtimestamp(acquisition_start_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
 
         acq_mode = params.get('acquisition_mode', 'SINGLE_SHOT')
-        print(f"\n{'=' * 60}")
-        print(f"ACQUISITION MODE: {acq_mode}")
-        print(f"{'=' * 60}")
 
-        # ============================================================
-        # Choose acquisition method based on mode
-        # ============================================================
-
-        if acq_mode == 'CURVE_BUFFER':
-            # OPTION 3: Use curve buffer
-            print(f"Started: {datetime.fromtimestamp(acquisition_start_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
-            all_X_raw, all_Y_raw = self.acquire_with_curve_buffer(params)
-
-        elif acq_mode == 'CONTINUOUS':
-            # OPTION 2: Continuous mode
-            print(f"Started: {datetime.fromtimestamp(acquisition_start_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
-            self.scope.continuous()  # Start continuous acquisition
-            time.sleep(0.1)  # Let it start
-
+        # Collect data!
+        if acq_mode == 'CONTINUOUS':
+            self.scope.continuous()
+            time.sleep(0.1)  # let it start
             loop_start = time.time()
             while (time.time() - loop_start) < params['timeout']:
                 self.capture_lockin_continuous()
                 capture_count += 1
-                time.sleep(0.001)  # Small delay to prevent overwhelming the system
-
-            all_X_raw = np.concatenate(self.lockin_X)
-            all_Y_raw = np.concatenate(self.lockin_Y)
-
+                time.sleep(0.001)  # small delay to avoid overwhelming the system
         else:  # SINGLE_SHOT (default)
-            # OPTION 1: Single shot mode (your original)
-            print(f"Started: {datetime.fromtimestamp(acquisition_start_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
-
             loop_start = time.time()
             while (time.time() - loop_start) < params['timeout']:
-                self.capture_lockin_single_shot()
+                self.capture_lockin()
                 capture_count += 1
-
-            all_X_raw = np.concatenate(self.lockin_X)
-            all_Y_raw = np.concatenate(self.lockin_Y)
 
         acquisition_end_time = time.time()
         actual_duration = acquisition_end_time - acquisition_start_time
 
-        if acq_mode != 'CURVE_BUFFER':
-            print(f"✓ Captured {capture_count} scope buffers")
+        print(f"✓ Captured {capture_count} scope buffers")
+
+        # Combine all the data
+        all_X_raw = np.concatenate(self.lockin_X)
+        all_Y_raw = np.concatenate(self.lockin_Y)
 
         # Apply gain correction
         all_X = all_X_raw * self.input_gain_factor
@@ -485,27 +417,25 @@ class RedPitayaLockInLogger:
         print("\n" + "=" * 60)
         print("LOCK-IN RESULTS")
         print("=" * 60)
-        print(f"Acquisition mode: {acq_mode}")
-        print(f"Input mode: {self.input_mode}")
+        print(f"Mode: {self.input_mode}")
         print(f"Gain correction: {self.input_gain_factor:.4f}x")
         print(f"DC offset correction: {self.input_dc_offset:.6f}V")
         print(f"Duration: {actual_duration:.3f}s")
         print(f"Samples collected: {n_samples}")
         print(f"Effective sample rate: {n_samples / actual_duration:.2f} Hz")
 
-        # Real statistics that matter
-        lock_in_sample_rate = 125e6  # Lock-in processes at full ADC rate
-        output_bandwidth = params.get('filter_bandwidth', 10)
-        time_constant = 1 / (2 * np.pi * output_bandwidth)
+        # Buffer timing stats
+        samples_per_buffer = n_samples / capture_count
+        time_per_buffer = actual_duration / capture_count
+        data_time_per_buffer = samples_per_buffer / self.nominal_sample_rate
+        gap_per_buffer = time_per_buffer - data_time_per_buffer
 
-        print(f"\nLock-in Processing:")
-        print(f"  ADC sample rate: {lock_in_sample_rate / 1e6:.0f} MHz (continuous)")
-        print(f"  Filter bandwidth: {output_bandwidth} Hz")
-        print(f"  Time constant: {time_constant * 1000:.2f} ms")
-        if acq_mode != 'CURVE_BUFFER':
-            print(f"  Scope buffers captured: {capture_count}")
-        print(f"  Data points logged: {n_samples}")
-        print(f"  Logging rate: {n_samples / actual_duration:.2f} samples/sec")
+        print(f"\nBuffer statistics:")
+        print(f"  Buffers captured: {capture_count}")
+        print(f"  Samples per buffer: {samples_per_buffer:.0f}")
+        print(f"  Data time per buffer: {data_time_per_buffer:.3f}s")
+        print(f"  Gap between buffers: {gap_per_buffer * 1000:.1f}ms")
+        print(f"  Dead time: {gap_per_buffer * capture_count:.2f}s ({gap_per_buffer * capture_count / actual_duration * 100:.1f}%)")
 
         print(f"\nMean R: {np.mean(R):.6f} ± {np.std(R):.6f} V")
         print(f"Mean X: {np.mean(all_X):.6f} ± {np.std(all_X):.6f} V")
@@ -513,24 +443,6 @@ class RedPitayaLockInLogger:
         print(f"Mean Theta: {np.mean(Theta):.3f} ± {np.std(Theta):.3f}°")
         print(f"\nMeasured R: {np.mean(R):.3f}V")
         print("=" * 60)
-
-        # Downsample for plotting if we have too many points
-        max_plot_points = 50000
-        downsample_factor = 1
-        if len(t) > max_plot_points:
-            downsample_factor = len(t) // max_plot_points
-            print(f"\n⚠ Downsampling from {len(t)} to ~{len(t) // downsample_factor} points for plotting...")
-            t_plot = t[::downsample_factor]
-            X_plot = all_X[::downsample_factor]
-            Y_plot = all_Y[::downsample_factor]
-            R_plot = R[::downsample_factor]
-            Theta_plot = Theta[::downsample_factor]
-        else:
-            t_plot = t
-            X_plot = all_X
-            Y_plot = all_Y
-            R_plot = R
-            Theta_plot = Theta
 
         # Make plots
         fig = plt.figure(figsize=(16, 10))
@@ -569,35 +481,33 @@ class RedPitayaLockInLogger:
 
         # X vs Time
         ax4 = plt.subplot(3, 3, 4)
-        ax4.plot(t_plot, X_plot, 'b-', linewidth=0.5)
+        ax4.plot(t, all_X, 'b-', linewidth=0.5)
         ax4.axhline(np.mean(all_X), color='r', linestyle='--', label=f'Mean: {np.mean(all_X):.9f}V')
         ax4.set_xlabel('Time (s)')
         ax4.set_ylabel('X (V)')
-        ax4.set_title(f'In-phase (X) - {acq_mode}')
+        ax4.set_title('In-phase (X)')
         ax4.legend()
         ax4.grid(True)
-        ax4.set_xlim(t_plot[0], t_plot[-1])
-        if len(X_plot) > 0:
-            margin_X = 5 * (np.max(X_plot) - np.min(X_plot))
-            ax4.set_ylim(np.min(X_plot) - margin_X, np.max(X_plot) + margin_X)
+        ax4.set_xlim(t[0], t[-1])
+        margin_X = 5 * (np.max(all_X) - np.min(all_X))
+        ax4.set_ylim(np.min(all_X) - margin_X, np.max(all_X) + margin_X)
 
         # Y vs Time
         ax5 = plt.subplot(3, 3, 5)
-        ax5.plot(t_plot, Y_plot, 'r-', linewidth=0.5)
+        ax5.plot(t, all_Y, 'r-', linewidth=0.5)
         ax5.axhline(np.mean(all_Y), color='b', linestyle='--', label=f'Mean: {np.mean(all_Y):.9f}V')
         ax5.set_xlabel('Time (s)')
         ax5.set_ylabel('Y (V)')
-        ax5.set_title(f'Quadrature (Y) - {acq_mode}')
+        ax5.set_title('Quadrature (Y)')
         ax5.legend()
         ax5.grid(True)
-        ax5.set_xlim(t_plot[0], t_plot[-1])
-        if len(Y_plot) > 0:
-            margin_Y = 5 * (np.max(Y_plot) - np.min(Y_plot))
-            ax5.set_ylim(np.min(Y_plot) - margin_Y, np.max(Y_plot) + margin_Y)
+        ax5.set_xlim(t[0], t[-1])
+        margin_Y = 5 * (np.max(all_Y) - np.min(all_Y))
+        ax5.set_ylim(np.min(all_Y) - margin_Y, np.max(all_Y) + margin_Y)
 
         # IQ plot
         ax6 = plt.subplot(3, 3, 6)
-        ax6.plot(X_plot, Y_plot, 'g.', markersize=1, alpha=0.5)
+        ax6.plot(all_X, all_Y, 'g.', markersize=1, alpha=0.5)
         ax6.plot(np.mean(all_X), np.mean(all_Y), 'r+', markersize=15, markeredgewidth=2, label='Mean')
         ax6.set_xlabel('X (V)')
         ax6.set_ylabel('Y (V)')
@@ -608,35 +518,33 @@ class RedPitayaLockInLogger:
 
         # R vs Time
         ax7 = plt.subplot(3, 3, 7)
-        ax7.plot(t_plot, R_plot * 1e6, 'm-', linewidth=0.5)
+        ax7.plot(t, R * 1e6, 'm-', linewidth=0.5)
         ax7.axhline(np.mean(R) * 1e6, color='b', linestyle='--', label=f'Mean: {np.mean(R) * 1e6:.6f}μA')
         ax7.set_xlabel('Time (s)')
         ax7.set_ylabel('R (μA)')
-        ax7.set_title(f'Magnitude (R) - {acq_mode}')
+        ax7.set_title('Magnitude (R)')
         ax7.legend()
         ax7.grid(True)
-        ax7.set_xlim(t_plot[0], t_plot[-1])
-        if len(R_plot) > 0:
-            margin_R = 5 * (np.max(R_plot * 1e6) - np.min(R_plot * 1e6))
-            ax7.set_ylim(np.min(R_plot * 1e6) - margin_R, np.max(R_plot * 1e6) + margin_R)
+        ax7.set_xlim(t[0], t[-1])
+        margin_R = 5 * (np.max(R * 1e6) - np.min(R * 1e6))
+        ax7.set_ylim(np.min(R * 1e6) - margin_R, np.max(R * 1e6) + margin_R)
 
         # Theta vs Time
         ax8 = plt.subplot(3, 3, 8)
-        ax8.plot(t_plot, Theta_plot, 'c-', linewidth=0.5)
+        ax8.plot(t, Theta, 'c-', linewidth=0.5)
         ax8.axhline(np.mean(Theta), color='r', linestyle='--', label=f'Mean: {np.mean(Theta):.3f}°')
         ax8.set_xlabel('Time (s)')
         ax8.set_ylabel('Theta (°)')
-        ax8.set_title(f'Phase (Theta) - {acq_mode}')
+        ax8.set_title('Phase (Theta)')
         ax8.legend()
         ax8.grid(True)
-        ax8.set_xlim(t_plot[0], t_plot[-1])
-        if len(Theta_plot) > 0:
-            margin_Theta = 5 * (np.max(Theta_plot) - np.min(Theta_plot))
-            ax8.set_ylim(np.min(Theta_plot) - margin_Theta, np.max(Theta_plot) + margin_Theta)
+        ax8.set_xlim(t[0], t[-1])
+        margin_Theta = 5 * (np.max(Theta) - np.min(Theta))
+        ax8.set_ylim(np.min(Theta) - margin_Theta, np.max(Theta) + margin_Theta)
 
         # Theta vs R
         ax9 = plt.subplot(3, 3, 9)
-        ax9.plot(Theta_plot, R_plot, 'g.', markersize=1, alpha=0.5)
+        ax9.plot(Theta, R, 'g.', markersize=1, alpha=0.5)
         ax9.plot(np.mean(Theta), np.mean(R), 'r+', markersize=15, markeredgewidth=2, label='Mean')
         ax9.set_xlabel('Theta (°)')
         ax9.set_ylabel('R (V)')
@@ -654,24 +562,22 @@ class RedPitayaLockInLogger:
             timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
             # Save plot
-            img_path = os.path.join(self.output_dir, f'lockin_{acq_mode}_{timestamp_str}.png')
+            img_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.png')
             plt.savefig(img_path, dpi=150)
             print(f"\n✓ Saved plot: {img_path}")
 
-            # Save CSV (use full resolution, not downsampled)
+            # Save CSV
             data = np.column_stack((sample_index, t, R, Theta, all_X, all_Y))
-            csv_path = os.path.join(self.output_dir, f'lockin_{acq_mode}_{timestamp_str}.csv')
+            csv_path = os.path.join(self.output_dir, f'lockin_results_{timestamp_str}.csv')
 
             with open(csv_path, 'w', newline='') as f:
                 f.write(f"# Red Pitaya Lock-In Amplifier Data Logger\n")
-                f.write(f"# Acquisition mode: {acq_mode}\n")
-                f.write(f"# Input mode: {self.input_mode}\n")
+                f.write(f"# Mode: {self.input_mode}\n")
                 f.write(f"# Gain correction: {self.input_gain_factor:.6f}\n")
                 f.write(f"# DC offset correction: {self.input_dc_offset:.6f} V\n")
                 f.write(f"# Reference frequency: {self.ref_freq} Hz\n")
                 f.write(f"# Reference amplitude: {params['ref_amp']} V\n")
                 f.write(f"# Filter bandwidth: {params.get('filter_bandwidth', 10)} Hz\n")
-                f.write(f"# Time constant: {time_constant * 1000:.2f} ms\n")
                 f.write(f"# Duration: {actual_duration:.3f} s\n")
                 f.write(f"# Samples: {n_samples}\n")
                 f.write(f"# Sample rate: {n_samples / actual_duration:.2f} Hz\n")
@@ -703,16 +609,14 @@ if __name__ == '__main__':
         'save_file': SAVE_DATA,
         'auto_calibrate': AUTO_CALIBRATE,
         'calibration_time': CALIBRATION_TIME,
-        'acquisition_mode': ACQUISITION_MODE,  # NEW!
+        'acquisition_mode': ACQUISITION_MODE,
     }
 
     print("=" * 60)
-    print("RED PITAYA LOCK-IN DATA LOGGER - MULTI-MODE VERSION")
+    print("RED PITAYA LOCK-IN DATA LOGGER")
     print("=" * 60)
-    print(f"Acquisition mode: {ACQUISITION_MODE}")
     print(f"Reference: {REF_FREQUENCY} Hz @ {REF_AMPLITUDE}V")
     print(f"Filter bandwidth: {FILTER_BANDWIDTH} Hz")
-    print(f"Decimation: {DECIMATION}")
     print(f"Measurement time: {MEASUREMENT_TIME}s")
     print(f"Input mode: {INPUT_MODE}")
     if INPUT_MODE.upper() == 'MANUAL':
