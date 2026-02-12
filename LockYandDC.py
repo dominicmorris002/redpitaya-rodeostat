@@ -31,7 +31,7 @@ MEASUREMENT_TIME = 12.0  # seconds
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'MANUAL'
 MANUAL_GAIN_FACTOR = 1.0  # Y component gain correction
-MANUAL_DC_OFFSET = 0.0    # Y component DC offset
+MANUAL_DC_OFFSET = 0.0  # Y component DC offset
 
 FILTER_BANDWIDTH = 10  # Hz
 AVERAGING_WINDOW = 10  # samples (moving average on logged data)
@@ -44,7 +44,7 @@ AUTO_CALIBRATE = True  # Only used if INPUT_MODE = 'AUTO'
 CALIBRATION_TIME = 2.0  # seconds
 
 # ACQUISITION MODE: 'SINGLE_SHOT' or 'CONTINUOUS'
-ACQUISITION_MODE = 'CONTINUOUS'
+ACQUISITION_MODE = 'SINGLE_SHOT'
 # ============================================================
 
 START_TIME_FILE = "start_time.txt"
@@ -105,7 +105,7 @@ class RedPitayaLockInYLogger:
 
         # Scope setup - read Y component and DC ramp
         self.scope.input1 = 'iq2_2'  # Y component from lock-in
-        self.scope.input2 = 'in2'     # DC ramp reference
+        self.scope.input2 = 'in2'  # DC ramp reference
         self.scope.decimation = DECIMATION
 
         if self.scope.decimation not in self.allowed_decimations:
@@ -226,13 +226,13 @@ class RedPitayaLockInYLogger:
 
     def setup_lockin(self, params):
         """Configure the lock-in (but don't generate reference signal)"""
-        ref_freq = params['ref_freq']
+        self.ref_freq = params['ref_freq']  # Store ref_freq for plotting
         filter_bw = params.get('filter_bandwidth', 10)
         phase_setting = params.get('phase', 0)
 
         # Setup lock-in to listen for reference from other Red Pitaya
         self.lockin.setup(
-            frequency=ref_freq,
+            frequency=self.ref_freq,
             bandwidth=filter_bw,
             gain=0.0,
             phase=phase_setting,
@@ -246,7 +246,7 @@ class RedPitayaLockInYLogger:
         actual_freq = self.lockin.frequency
 
         print(f"\nY Lock-in Configuration:")
-        print(f"  Frequency: {ref_freq} Hz (actual: {actual_freq:.2f} Hz)")
+        print(f"  Frequency: {self.ref_freq} Hz (actual: {actual_freq:.2f} Hz)")
         print(f"  Bandwidth: {filter_bw} Hz")
         print(f"  Gain correction: {self.input_gain_factor:.4f}x")
         print(f"  DC offset correction: {self.input_dc_offset:.6f}V")
@@ -355,47 +355,79 @@ class RedPitayaLockInYLogger:
         print(f"  Samples per buffer: {samples_per_buffer:.0f}")
         print(f"  Data time per buffer: {data_time_per_buffer:.3f}s")
         print(f"  Gap per buffer: {dead_time * 1000:.1f} ms")
-        print(f"  Dead time: {dead_time * capture_count:.2f}s ({dead_time * capture_count / actual_duration * 100:.1f}%)")
+        print(
+            f"  Dead time: {dead_time * capture_count:.2f}s ({dead_time * capture_count / actual_duration * 100:.1f}%)")
         print("=" * 60)
 
-        # Make plots
-        fig = plt.figure(figsize=(14, 8))
+        # Grab raw signals for plots
+        self.scope.input1 = 'out1'
+        self.scope.input2 = 'in1'
+        time.sleep(0.05)
+        self.scope.single()
+        out1_raw = np.array(self.scope._data_ch1_current)
+        in1_raw_uncorrected = np.array(self.scope._data_ch2_current)
+        in1_raw = (in1_raw_uncorrected - self.input_dc_offset) * self.input_gain_factor
 
-        # Y vs Time
-        ax1 = plt.subplot(2, 2, 1)
-        ax1.plot(t, all_Y, 'r-', linewidth=0.5)
-        ax1.axhline(np.mean(all_Y), color='b', linestyle='--', label=f'Mean: {np.mean(all_Y):.6f}V')
-        ax1.set_xlabel('Time (s)')
-        ax1.set_ylabel('Y (V)')
-        ax1.set_title('Quadrature (Y) vs Time')
-        ax1.legend()
+        # Put scope back to lock-in Y and DC ramp
+        self.scope.input1 = 'iq2_2'
+        self.scope.input2 = 'in2'
+
+        # Calculate magnitude (just Y for this logger, no X available)
+        R_y = np.abs(all_Y)
+
+        # Make plots - 3x3 layout matching original
+        fig = plt.figure(figsize=(16, 10))
+
+        t_raw_corrected = np.linspace(0, len(out1_raw) / self.nominal_sample_rate, len(out1_raw))
+
+        # Reference signal (listening only)
+        ax1 = plt.subplot(3, 3, 1)
+        n_periods = 5
+        n_plot = min(int(n_periods * self.nominal_sample_rate / self.ref_freq), len(out1_raw))
+        ax1.plot(t_raw_corrected[:n_plot] * 1000, out1_raw[:n_plot], 'b-', linewidth=1)
+        ax1.set_xlabel('Time (ms)')
+        ax1.set_ylabel('OUT1 (V)')
+        ax1.set_title(f'Reference @ {self.ref_freq} Hz (from RP1)')
         ax1.grid(True)
 
-        # DC Ramp vs Time
-        ax2 = plt.subplot(2, 2, 2)
-        ax2.plot(t, all_ramp_raw, 'g-', linewidth=0.5)
-        ax2.set_xlabel('Time (s)')
-        ax2.set_ylabel('DC Ramp (V)')
-        ax2.set_title('DC Ramp vs Time')
+        # Input signal
+        ax2 = plt.subplot(3, 3, 2)
+        ax2.plot(t_raw_corrected[:n_plot] * 1000, in1_raw[:n_plot], 'r-', linewidth=1)
+        ax2.set_xlabel('Time (ms)')
+        ax2.set_ylabel('IN1 (V, corrected)')
+        ax2.set_title(f'Input - {self.input_mode}')
         ax2.grid(True)
 
-        # Y vs DC Ramp
-        ax3 = plt.subplot(2, 2, 3)
-        ax3.plot(all_ramp_raw, all_Y, 'm-', linewidth=0.5)
-        ax3.set_xlabel('DC Ramp (V)')
-        ax3.set_ylabel('Y (V)')
-        ax3.set_title('Y vs DC Ramp')
+        # DC Ramp vs Time
+        ax3 = plt.subplot(3, 3, 3)
+        ax3.plot(t, all_ramp_raw, 'g-', linewidth=0.5)
+        ax3.set_xlabel('Time (s)')
+        ax3.set_ylabel('DC Ramp (V)')
+        ax3.set_title('DC Ramp (IN2) vs Time')
         ax3.grid(True)
 
-        # Y histogram
-        ax4 = plt.subplot(2, 2, 4)
-        ax4.hist(all_Y, bins=50, alpha=0.7, color='red')
-        ax4.axvline(np.mean(all_Y), color='b', linestyle='--', label=f'Mean: {np.mean(all_Y):.6f}V')
-        ax4.set_xlabel('Y (V)')
-        ax4.set_ylabel('Count')
-        ax4.set_title('Y Distribution')
+        # Y vs Time
+        ax4 = plt.subplot(3, 3, 4)
+        ax4.plot(t, all_Y, 'r-', linewidth=0.5)
+        ax4.axhline(np.mean(all_Y), color='b', linestyle='--', label=f'Mean: {np.mean(all_Y):.9f}V')
+        ax4.set_xlabel('Time (s)')
+        ax4.set_ylabel('Y (V)')
+        ax4.set_title('Quadrature (Y)')
         ax4.legend()
         ax4.grid(True)
+        ax4.set_xlim(t[0], t[-1])
+        margin_Y = 5 * (np.max(all_Y) - np.min(all_Y)) if np.max(all_Y) != np.min(all_Y) else 0.001
+        ax4.set_ylim(np.min(all_Y) - margin_Y, np.max(all_Y) + margin_Y)
+
+        # Y vs DC Ramp
+        ax5 = plt.subplot(3, 3, 5)
+        ax5.plot(all_ramp_raw, all_Y, 'm-', linewidth=0.5)
+        ax5.set_xlabel('DC Ramp (V)')
+        ax5.set_ylabel('Y (V)')
+        ax5.set_title('Y vs DC Ramp')
+        ax5.grid(True)
+
+
 
         plt.tight_layout()
 
