@@ -143,47 +143,47 @@ print(f"Y samples in overlap: {len(ramp_y_overlap)}")
 if len(ramp_x_overlap) <= len(ramp_y_overlap):
     # Use X ramp as reference, interpolate Y onto it
     print("\n✓ Using X ramp as reference, interpolating Y")
-    
+
     # Sort X by ramp voltage
     sort_idx_x = np.argsort(ramp_x_overlap)
     ramp_ref = ramp_x_overlap[sort_idx_x]
     x_ref = x_overlap[sort_idx_x]
-    
+
     # Sort Y by ramp voltage
     sort_idx_y = np.argsort(ramp_y_overlap)
     ramp_y_sorted = ramp_y_overlap[sort_idx_y]
     y_sorted = y_overlap[sort_idx_y]
-    
+
     # Interpolate Y values onto X's ramp positions
-    interp_func = interpolate.interp1d(ramp_y_sorted, y_sorted, 
-                                      kind='linear', 
-                                      bounds_error=False,
-                                      fill_value='extrapolate')
+    interp_func = interpolate.interp1d(ramp_y_sorted, y_sorted,
+                                       kind='linear',
+                                       bounds_error=False,
+                                       fill_value='extrapolate')
     y_ref = interp_func(ramp_ref)
-    
+
 else:
     # Use Y ramp as reference, interpolate X onto it
     print("\n✓ Using Y ramp as reference, interpolating X")
-    
+
     # Sort Y by ramp voltage
     sort_idx_y = np.argsort(ramp_y_overlap)
     ramp_ref = ramp_y_overlap[sort_idx_y]
     y_ref = y_overlap[sort_idx_y]
-    
+
     # Sort X by ramp voltage
     sort_idx_x = np.argsort(ramp_x_overlap)
     ramp_x_sorted = ramp_x_overlap[sort_idx_x]
     x_sorted = x_overlap[sort_idx_x]
-    
+
     # Interpolate X values onto Y's ramp positions
     interp_func = interpolate.interp1d(ramp_x_sorted, x_sorted,
-                                      kind='linear',
-                                      bounds_error=False,
-                                      fill_value='extrapolate')
+                                       kind='linear',
+                                       bounds_error=False,
+                                       fill_value='extrapolate')
     x_ref = interp_func(ramp_ref)
 
 # Calculate R and Theta
-R = np.sqrt(x_ref**2 + y_ref**2)
+R = np.sqrt(x_ref ** 2 + y_ref ** 2)
 Theta = np.degrees(np.arctan2(y_ref, x_ref))
 
 n_merged = len(ramp_ref)
@@ -217,63 +217,106 @@ print(f"\n✓ Saved merged CSV: {merged_csv}")
 # ============================================================
 fig = plt.figure(figsize=(20, 12))
 
-# Top row: Original plots side by side
-ax1 = plt.subplot2grid((3, 2), (0, 0), colspan=1)
+# Top row: Original plots side by side + FFT
+ax1 = plt.subplot2grid((3, 3), (0, 0), colspan=1)
 img_x = imread(x_png)
 ax1.imshow(img_x)
 ax1.axis('off')
 ax1.set_title('Lock-in X Component + DC Ramp (RP1)',
               fontsize=14, fontweight='bold', pad=10)
 
-ax2 = plt.subplot2grid((3, 2), (0, 1), colspan=1)
+ax2 = plt.subplot2grid((3, 3), (0, 1), colspan=1)
 img_y = imread(y_png)
 ax2.imshow(img_y)
 ax2.axis('off')
 ax2.set_title('Lock-in Y Component + DC Ramp (RP2)',
               fontsize=14, fontweight='bold', pad=10)
 
-# Middle row: ACCV-style plots
-# AC Magnitude (R) vs DC Potential
-ax3 = plt.subplot2grid((3, 2), (1, 0))
-ax3.plot(merged_df['DC_Voltage'], merged_df['R']*1e6, 'b-', linewidth=1.5, alpha=0.8)
-ax3.set_xlabel('DC Potential (V)', fontsize=12, fontweight='bold')
-ax3.set_ylabel('AC Magnitude R (μA)', fontsize=12, fontweight='bold', color='b')
-ax3.tick_params(axis='y', labelcolor='b')
-ax3.set_title('AC Magnitude vs DC Potential', fontsize=13, fontweight='bold')
+# FFT Analysis
+ax3 = plt.subplot2grid((3, 3), (0, 2))
+# Perform FFT on merged IQ data
+iq = x_ref + 1j * y_ref
+n_pts = len(iq)
+win = np.hanning(n_pts)
+IQwin = iq * win
+IQfft = np.fft.fftshift(np.fft.fft(IQwin))
+# Create frequency axis based on ramp span
+ramp_span = np.max(ramp_ref) - np.min(ramp_ref)
+freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, ramp_span / n_pts))
+psd_lock = (np.abs(IQfft) ** 2) / (n_pts * np.sum(win ** 2))
+
+ax3.semilogy(freqs_lock, psd_lock, label='Lock-in PSD')
+ax3.set_xlabel('Frequency (Hz)', fontsize=11, fontweight='bold')
+ax3.set_ylabel('Power', fontsize=11, fontweight='bold')
+ax3.set_title('FFT of Demodulated Signal', fontsize=13, fontweight='bold')
+ax3.legend()
 ax3.grid(True, alpha=0.3)
 
-# Phase vs DC Potential
-ax4 = plt.subplot2grid((3, 2), (1, 1))
-ax4.plot(merged_df['DC_Voltage'], merged_df['Theta'], 'r-', linewidth=1.5, alpha=0.8)
-ax4.set_xlabel('DC Potential (V)', fontsize=12, fontweight='bold')
-ax4.set_ylabel('Phase Angle (°)', fontsize=12, fontweight='bold', color='r')
-ax4.tick_params(axis='y', labelcolor='r')
-ax4.set_title('Phase Angle vs DC Potential', fontsize=13, fontweight='bold')
-ax4.grid(True, alpha=0.3)
-
-# Bottom row: IQ plot and combined view
-# IQ Plot
-ax5 = plt.subplot2grid((3, 2), (2, 0))
-ax5.plot(merged_df['X'], merged_df['Y'], 'g-', linewidth=1.0, alpha=0.7)
-ax5.plot(np.mean(merged_df['X']), np.mean(merged_df['Y']), 'r+', 
+# Middle row: IQ plot, R vs Time, Theta vs Time
+# IQ Plot (X vs Y)
+ax4 = plt.subplot2grid((3, 3), (1, 0))
+ax4.plot(merged_df['X'], merged_df['Y'], 'g.', markersize=1, alpha=0.5)
+ax4.plot(np.mean(merged_df['X']), np.mean(merged_df['Y']), 'r+',
          markersize=15, markeredgewidth=2, label='Mean')
-ax5.set_xlabel('X (In-Phase) (V)', fontsize=12, fontweight='bold')
-ax5.set_ylabel('Y (Quadrature) (V)', fontsize=12, fontweight='bold')
-ax5.set_title('IQ Plot (Demodulated Components)', fontsize=13, fontweight='bold')
-ax5.grid(True, alpha=0.3)
-ax5.legend()
-ax5.axis('equal')
+ax4.set_xlabel('X (V)', fontsize=12, fontweight='bold')
+ax4.set_ylabel('Y (V)', fontsize=12, fontweight='bold')
+ax4.set_title('IQ Plot', fontsize=13, fontweight='bold')
+ax4.grid(True, alpha=0.3)
+ax4.legend()
+ax4.axis('equal')
 
-# Combined 3D-style plot (DC vs R vs Phase)
-ax6 = plt.subplot2grid((3, 2), (2, 1))
-scatter = ax6.scatter(merged_df['DC_Voltage'], merged_df['R']*1e6,
-                     c=merged_df['Theta'], s=2, alpha=0.6,
-                     cmap='viridis', marker='.')
-ax6.set_xlabel('DC Potential (V)', fontsize=12, fontweight='bold')
-ax6.set_ylabel('AC Magnitude R (μA)', fontsize=12, fontweight='bold')
-ax6.set_title('AC Response Map (colored by phase)', fontsize=13, fontweight='bold')
+# R vs Time (use index as proxy for time)
+ax5 = plt.subplot2grid((3, 3), (1, 1))
+t_merged = merged_df['Index'].values
+ax5.plot(t_merged, merged_df['R'] * 1e6, 'm-', linewidth=0.5)
+ax5.axhline(np.mean(merged_df['R']) * 1e6, color='b', linestyle='--',
+            label=f"Mean: {np.mean(merged_df['R']) * 1e6:.6f}μA")
+ax5.set_xlabel('Sample Index', fontsize=12, fontweight='bold')
+ax5.set_ylabel('R (μA)', fontsize=12, fontweight='bold')
+ax5.set_title('Magnitude (R)', fontsize=13, fontweight='bold')
+ax5.legend()
+ax5.grid(True, alpha=0.3)
+
+# Theta vs Time
+ax6 = plt.subplot2grid((3, 3), (1, 2))
+ax6.plot(t_merged, merged_df['Theta'], 'c-', linewidth=0.5)
+ax6.axhline(np.mean(merged_df['Theta']), color='r', linestyle='--',
+            label=f"Mean: {np.mean(merged_df['Theta']):.3f}°")
+ax6.set_xlabel('Sample Index', fontsize=12, fontweight='bold')
+ax6.set_ylabel('Theta (°)', fontsize=12, fontweight='bold')
+ax6.set_title('Phase (Theta)', fontsize=13, fontweight='bold')
+ax6.legend()
 ax6.grid(True, alpha=0.3)
-cbar = plt.colorbar(scatter, ax=ax6)
+
+# Bottom row: R vs DC Ramp, Theta vs DC Ramp, Response Map
+# R vs DC Ramp
+ax7 = plt.subplot2grid((3, 3), (2, 0))
+ax7.plot(merged_df['DC_Voltage'], merged_df['R'] * 1e6, 'b-', linewidth=1.0, alpha=0.8)
+ax7.set_xlabel('DC Ramp (V)', fontsize=12, fontweight='bold')
+ax7.set_ylabel('AC Magnitude R (μA)', fontsize=12, fontweight='bold', color='b')
+ax7.tick_params(axis='y', labelcolor='b')
+ax7.set_title('AC Magnitude vs DC Potential', fontsize=13, fontweight='bold')
+ax7.grid(True, alpha=0.3)
+
+# Theta vs DC Ramp
+ax8 = plt.subplot2grid((3, 3), (2, 1))
+ax8.plot(merged_df['DC_Voltage'], merged_df['Theta'], 'r-', linewidth=1.0, alpha=0.8)
+ax8.set_xlabel('DC Ramp (V)', fontsize=12, fontweight='bold')
+ax8.set_ylabel('Phase Angle (°)', fontsize=12, fontweight='bold', color='r')
+ax8.tick_params(axis='y', labelcolor='r')
+ax8.set_title('Phase Angle vs DC Potential', fontsize=13, fontweight='bold')
+ax8.grid(True, alpha=0.3)
+
+# Combined Response Map (DC vs R colored by Phase)
+ax9 = plt.subplot2grid((3, 3), (2, 2))
+scatter = ax9.scatter(merged_df['DC_Voltage'], merged_df['R'] * 1e6,
+                      c=merged_df['Theta'], s=2, alpha=0.6,
+                      cmap='viridis', marker='.')
+ax9.set_xlabel('DC Potential (V)', fontsize=12, fontweight='bold')
+ax9.set_ylabel('AC Magnitude R (μA)', fontsize=12, fontweight='bold')
+ax9.set_title('AC Response Map (colored by phase)', fontsize=13, fontweight='bold')
+ax9.grid(True, alpha=0.3)
+cbar = plt.colorbar(scatter, ax=ax9)
 cbar.set_label('Phase (°)', fontsize=10, fontweight='bold')
 
 # Overall title
@@ -291,16 +334,16 @@ print(f"✓ Saved ACCV-style plot: {combined_png}")
 print("\n" + "=" * 60)
 print("AC CYCLIC VOLTAMMETRY STATISTICS")
 print("=" * 60)
-print(f"AC Magnitude (R):  {np.mean(merged_df['R'])*1e6:.3f} ± {np.std(merged_df['R'])*1e6:.3f} μA")
+print(f"AC Magnitude (R):  {np.mean(merged_df['R']) * 1e6:.3f} ± {np.std(merged_df['R']) * 1e6:.3f} μA")
 print(f"Phase Angle:       {np.mean(merged_df['Theta']):.3f} ± {np.std(merged_df['Theta']):.3f}°")
 print(f"X Component:       {np.mean(merged_df['X']):.6f} ± {np.std(merged_df['X']):.6f} V")
 print(f"Y Component:       {np.mean(merged_df['Y']):.6f} ± {np.std(merged_df['Y']):.6f} V")
 print(f"DC Potential:      {np.mean(merged_df['DC_Voltage']):.6f} ± {np.std(merged_df['DC_Voltage']):.6f} V")
 print(f"\nCorrelations:")
-print(f"  R vs DC:         {np.corrcoef(merged_df['R'], merged_df['DC_Voltage'])[0,1]:.4f}")
-print(f"  Phase vs DC:     {np.corrcoef(merged_df['Theta'], merged_df['DC_Voltage'])[0,1]:.4f}")
-print(f"  X vs DC:         {np.corrcoef(merged_df['X'], merged_df['DC_Voltage'])[0,1]:.4f}")
-print(f"  Y vs DC:         {np.corrcoef(merged_df['Y'], merged_df['DC_Voltage'])[0,1]:.4f}")
+print(f"  R vs DC:         {np.corrcoef(merged_df['R'], merged_df['DC_Voltage'])[0, 1]:.4f}")
+print(f"  Phase vs DC:     {np.corrcoef(merged_df['Theta'], merged_df['DC_Voltage'])[0, 1]:.4f}")
+print(f"  X vs DC:         {np.corrcoef(merged_df['X'], merged_df['DC_Voltage'])[0, 1]:.4f}")
+print(f"  Y vs DC:         {np.corrcoef(merged_df['Y'], merged_df['DC_Voltage'])[0, 1]:.4f}")
 print("=" * 60)
 
 plt.show()
