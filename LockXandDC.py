@@ -1,16 +1,18 @@
 """
-Red Pitaya Lock-In Y Component + DC Ramp Logger
-Architecture matches Lock-In logger exactly.
+Red Pitaya Lock-In Amplifier - X Component + DC Ramp
+
+Uses PyRPL's built-in lock-in (iq2 module) to log X(In-Phase) component.
+Also captures DC ramp on IN2 for synchronization.
 
 Scope setup:
-- CH1: iq2_2 (Y component from lock-in)
+- CH1: iq2 (X component from lock-in)
 - CH2: in2 (DC ramp reference signal)
 
-Connect your DC ramp to IN2.
+For testing: connect OUT1 to IN1 with a cable.
+Supports AUTO, LV, HV, or MANUAL gain modes.
+Phase is in degrees!
 
-To do AC CV use the startboth file
-
-Have a Great Day ;)
+Have a great day :)
 """
 
 from datetime import datetime
@@ -24,17 +26,19 @@ from pyrpl import Pyrpl
 # MEASUREMENT PARAMETERS
 # ============================================================
 REF_FREQUENCY = 500  # Hz
-REF_AMPLITUDE = 0.2  # V (not used, Y device doesn't generate reference)
+REF_AMPLITUDE = 0.2  # V
+OUTPUT_CHANNEL = 'out1'
 PHASE_OFFSET = 0  # degrees
-MEASUREMENT_TIME = 12.0  # seconds
+MEASUREMENT_TIME = 12  # seconds
 
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'MANUAL'
-MANUAL_GAIN_FACTOR = 1.0  # Y component gain correction
-MANUAL_DC_OFFSET = 0.0    # Y component DC offset
+AUTOLAB_GAIN = 1  # Based on Autolab "Current Scale" if Scale = 1mA : Set to 1e-3
+MANUAL_GAIN_FACTOR = 1 * AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'
+MANUAL_DC_OFFSET = 0  # Only used if INPUT_MODE = 'MANUAL'
 
 FILTER_BANDWIDTH = 10  # Hz
-AVERAGING_WINDOW = 10  # samples (moving average on logged data)
+AVERAGING_WINDOW = 1  # samples (moving average on logged data)
 DECIMATION = 1024
 
 SAVE_DATA = True
@@ -49,36 +53,34 @@ ACQUISITION_MODE = 'SINGLE_SHOT'
 
 START_TIME_FILE = "start_time.txt"
 
-# Synchronization with other processes
+# Sync with other processes if needed
 try:
     with open(START_TIME_FILE, "r") as f:
         START_TIME = datetime.fromisoformat(f.read().strip())
     while datetime.now() < START_TIME:
         time.sleep(0.001)
 except FileNotFoundError:
-    pass  # No sync file, start immediately
+    pass  # no sync file, just start now
 
 
-class RedPitayaLockInYLogger:
-    """Y component logger using lock-in + DC ramp reference"""
+class RedPitayaLockInLogger:
+    """Data logger for PyRPL's built-in lock-in - X component + DC ramp"""
 
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
-    def __init__(self, output_dir='test_data', input_mode='AUTO',
-                 manual_gain=1.0, manual_offset=0.0):
-
-        self.rp = Pyrpl(config='dc_config5', hostname='rp-f0909c.local')
+    def __init__(self, output_dir='test_data', input_mode='AUTO', manual_gain=1.0, manual_offset=0.0):
+        self.rp = Pyrpl(config='lockin_config10', hostname='rp-f073ce.local')
+        self.output_dir = output_dir
         self.rp_modules = self.rp.rp
         self.lockin = self.rp_modules.iq2
+        self.ref_sig = self.rp_modules.asg0
         self.scope = self.rp_modules.scope
-        self.asg = self.rp_modules.asg0
-        self.output_dir = output_dir
 
-        self.lockin_Y = []
-        self.dc_ramp = []
+        self.lockin_X = []
+        self.dc_ramp = []  # Changed from lockin_Y
         self.capture_times = []
 
-        # Setup input gain scaling and DC offset
+        # Setup input gain and DC offset
         self.input_gain_factor = manual_gain
         self.input_dc_offset = manual_offset
         self.input_mode_setting = input_mode.upper()
@@ -103,25 +105,24 @@ class RedPitayaLockInYLogger:
             self.input_mode = "AUTO (will calibrate)"
             print("Input mode: AUTO - will auto-detect")
 
-        # Scope setup - read Y component and DC ramp
-        self.scope.input1 = 'iq2_2'  # Y component from lock-in
-        self.scope.input2 = 'in2'     # DC ramp reference
+        # Point scope at lock-in X output and DC ramp reference
+        self.scope.input1 = 'iq2'  # X component
+        self.scope.input2 = 'in2'  # DC ramp reference (physical input)
         self.scope.decimation = DECIMATION
 
         if self.scope.decimation not in self.allowed_decimations:
-            raise ValueError(f"Invalid decimation {DECIMATION}")
+            raise ValueError(f'Invalid decimation. Must be one of {self.allowed_decimations}')
 
         self.scope._start_acquisition_rolling_mode()
         self.scope.average = True
-        self.nominal_sample_rate = 125e6 / self.scope.decimation
 
-        print(f"Y Component Logger initialized")
-        print(f"Nominal sample rate: {self.nominal_sample_rate:.2f} Hz")
+        # Nominal sample rate
+        self.nominal_sample_rate = 125e6 / self.scope.decimation
 
     def calibrate_input_gain(self, cal_freq=100, cal_amp=1.0, cal_time=2.0, force=False):
         """
-        Measure actual input scaling and DC offset by comparing OUT1 to IN1 directly.
-        This measures the physical signal on IN1.
+        Figure out input scaling and DC offset by comparing OUT1 to IN1.
+        Measures the actual physical signal on IN1.
         """
         if not force and self.input_mode_setting != 'AUTO':
             print(f"Skipping calibration - using {self.input_mode}")
@@ -131,14 +132,15 @@ class RedPitayaLockInYLogger:
         print("CALIBRATING INPUT SCALING AND DC OFFSET...")
         print("=" * 60)
 
-        # Step 1: Measure DC offset with no signal
+        # Step 1: Check DC offset with nothing connected
         print("Step 1: Measuring DC offset on IN1 (no signal)...")
-        self.asg.output_direct = 'off'
+        self.ref_sig.output_direct = 'off'
+        self.lockin.output_direct = 'off'
 
-        # Configure scope to read raw IN1
+        # Point scope at raw IN1
         self.scope.input1 = 'in1'
         self.scope.input2 = 'in1'
-        time.sleep(0.3)  # Let signal settle
+        time.sleep(0.3)  # wait for things to settle
 
         offset_samples = []
         for _ in range(10):
@@ -148,24 +150,24 @@ class RedPitayaLockInYLogger:
         self.input_dc_offset = np.mean(offset_samples)
         print(f"  Measured DC offset: {self.input_dc_offset:.6f}V")
 
-        # Step 2: Measure gain with calibration signal
+        # Step 2: Send a signal and see what comes back
         print(f"\nStep 2: Measuring gain with {cal_amp}V @ {cal_freq} Hz...")
 
-        # Configure scope to read OUT1 and IN1
+        # Now look at both OUT1 and IN1
         self.scope.input1 = 'out1'
         self.scope.input2 = 'in1'
 
-        # Generate calibration signal using ASG
-        self.asg.setup(
+        # Generate test signal
+        self.ref_sig.setup(
             frequency=cal_freq,
             amplitude=cal_amp,
             offset=0,
             waveform='sin',
             trigger_source='immediately'
         )
-        self.asg.output_direct = 'out1'
+        self.ref_sig.output_direct = 'out1'
 
-        time.sleep(0.5)  # Let signal settle
+        time.sleep(0.5)  # let it settle
 
         cal_out1 = []
         cal_in1 = []
@@ -173,31 +175,31 @@ class RedPitayaLockInYLogger:
 
         while (time.time() - start_time) < cal_time:
             self.scope.single()
-            ch1 = np.array(self.scope._data_ch1_current)  # OUT1
-            ch2 = np.array(self.scope._data_ch2_current)  # IN1 (raw)
+            ch1 = np.array(self.scope._data_ch1_current)  # what we sent
+            ch2 = np.array(self.scope._data_ch2_current)  # what we got back
             cal_out1.append(ch1)
             cal_in1.append(ch2)
 
-        # Concatenate all samples
+        # Put all the data together
         all_out1 = np.concatenate(cal_out1)
         all_in1 = np.concatenate(cal_in1)
 
-        # Remove DC offset from IN1
+        # Remove DC offset
         all_in1_corrected = all_in1 - self.input_dc_offset
 
-        # Calculate peak-to-peak amplitudes
+        # Find peak amplitudes
         out1_peak = (np.max(all_out1) - np.min(all_out1)) / 2
         in1_peak = (np.max(all_in1_corrected) - np.min(all_in1_corrected)) / 2
 
-        # Also calculate RMS for comparison
+        # Also check RMS
         out1_rms = np.sqrt(np.mean(all_out1 ** 2))
         in1_rms = np.sqrt(np.mean(all_in1_corrected ** 2))
 
-        # Gain factor = what we sent / what we measured
+        # Calculate gain: what we sent / what we got
         self.input_gain_factor = out1_peak / in1_peak
         gain_rms = out1_rms / in1_rms
 
-        # Classify the mode based on gain
+        # Try to guess what mode we're in
         if self.input_gain_factor < 1.05:
             self.input_mode = "LV (±1V)"
         elif self.input_gain_factor < 2.0:
@@ -215,79 +217,94 @@ class RedPitayaLockInYLogger:
         print(f"  Detected mode: {self.input_mode}")
         print("=" * 60 + "\n")
 
-        # Turn off calibration signal
-        self.asg.output_direct = 'off'
-
-        # Restore scope to Y component and DC ramp
-        self.scope.input1 = 'iq2_2'
+        # Put scope back to lock-in X and DC ramp
+        self.scope.input1 = 'iq2'
         self.scope.input2 = 'in2'
 
         return self.input_gain_factor
 
     def setup_lockin(self, params):
-        """Configure the lock-in (but don't generate reference signal)"""
-        ref_freq = params['ref_freq']
+        """Configure the lock-in"""
+        self.ref_freq = params['ref_freq']
+        self.ref_period = 1 / self.ref_freq
+        ref_amp = params['ref_amp']
         filter_bw = params.get('filter_bandwidth', 10)
         phase_setting = params.get('phase', 0)
 
-        # Setup lock-in to listen for reference from other Red Pitaya
+        self.ref_sig.output_direct = 'off'
+
+        # Setup PyRPL's iq2 module
         self.lockin.setup(
-            frequency=ref_freq,
+            frequency=self.ref_freq,
             bandwidth=filter_bw,
             gain=0.0,
             phase=phase_setting,
             acbandwidth=0,
-            amplitude=0.0,  # Don't generate output
+            amplitude=ref_amp,
             input='in1',
-            output_direct='off',  # No output
+            output_direct=params['output_ref'],
             output_signal='quadrature',
             quadrature_factor=1.0)
 
+        # Double-check what PyRPL actually did
         actual_freq = self.lockin.frequency
+        actual_amp = self.lockin.amplitude
 
-        print(f"\nY Lock-in Configuration:")
-        print(f"  Frequency: {ref_freq} Hz (actual: {actual_freq:.2f} Hz)")
-        print(f"  Bandwidth: {filter_bw} Hz")
-        print(f"  Gain correction: {self.input_gain_factor:.4f}x")
-        print(f"  DC offset correction: {self.input_dc_offset:.6f}V")
-        print(f"  (Listening for reference from other Red Pitaya)")
+        print(f"Lock-in frequency: {self.ref_freq} Hz (actual: {actual_freq:.2f} Hz)")
+        print(f"Lock-in bandwidth: {filter_bw} Hz")
+        print(f"Reference amplitude: {ref_amp}V on {params['output_ref']} (actual: {actual_amp:.3f}V)")
 
-    def capture_buffer(self):
-        """Capture one scope buffer (single shot)"""
+        if abs(actual_freq - self.ref_freq) > 0.1:
+            print(f"⚠ WARNING: Requested {self.ref_freq} Hz but PyRPL set {actual_freq:.2f} Hz!")
+        print(f"Gain correction: {self.input_gain_factor:.4f}x")
+        print(f"DC offset correction: {self.input_dc_offset:.6f}V")
+
+    def capture_lockin(self):
+        """Grab one buffer of lock-in X data + DC ramp"""
         capture_time = time.time()
         self.scope.single()
-        ch1 = np.array(self.scope._data_ch1_current)  # Y component
-        ch2 = np.array(self.scope._data_ch2_current)  # DC ramp
-        self.lockin_Y.append(ch1)
+
+        ch1 = np.array(self.scope._data_ch1_current)  # X from lock-in
+        ch2 = np.array(self.scope._data_ch2_current)  # DC ramp from IN2
+
+        self.lockin_X.append(ch1)
         self.dc_ramp.append(ch2)
         self.capture_times.append(capture_time)
 
-    def capture_buffer_continuous(self):
-        """Capture one scope buffer in continuous mode (no blocking single() call)"""
+        return ch1, ch2
+
+    def capture_lockin_continuous(self):
+        """Grab lock-in data in continuous mode (no blocking single() call)"""
         capture_time = time.time()
-        ch1 = np.array(self.scope._data_ch1_current)  # Y component
-        ch2 = np.array(self.scope._data_ch2_current)  # DC ramp
-        self.lockin_Y.append(ch1)
+
+        ch1 = np.array(self.scope._data_ch1_current)  # X from lock-in
+        ch2 = np.array(self.scope._data_ch2_current)  # DC ramp from IN2
+
+        self.lockin_X.append(ch1)
         self.dc_ramp.append(ch2)
         self.capture_times.append(capture_time)
+
+        return ch1, ch2
 
     def run(self, params):
-        # Auto-calibrate if requested
+        """Main acquisition loop"""
+
+        # Run calibration if AUTO mode
         if params.get('auto_calibrate', False):
             self.calibrate_input_gain(
-                cal_freq=100,  # Use 100 Hz for calibration
-                cal_amp=1.0,
+                cal_freq=params['ref_freq'],
+                cal_amp=params['ref_amp'],
                 cal_time=params.get('calibration_time', 2.0)
             )
 
-        # Setup lock-in
+        # Get everything running
         self.setup_lockin(params)
-
-        print("\nAllowing lock-in to settle...")
+        print("Allowing lock-in to settle...")
         time.sleep(0.5)
 
-        acquisition_start = time.time()
-        print(f"Started: {datetime.fromtimestamp(acquisition_start).strftime('%Y-%m-%d %H:%M:%S.%f')}")
+        acquisition_start_time = time.time()
+        capture_count = 0
+        print(f"Started: {datetime.fromtimestamp(acquisition_start_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
 
         acq_mode = params.get('acquisition_mode', 'SINGLE_SHOT')
 
@@ -297,134 +314,176 @@ class RedPitayaLockInYLogger:
             time.sleep(0.1)  # let it start
             loop_start = time.time()
             while (time.time() - loop_start) < params['timeout']:
-                self.capture_buffer_continuous()
+                self.capture_lockin_continuous()
+                capture_count += 1
                 time.sleep(0.001)  # small delay to avoid overwhelming the system
         else:  # SINGLE_SHOT (default)
             loop_start = time.time()
             while (time.time() - loop_start) < params['timeout']:
-                self.capture_buffer()
+                self.capture_lockin()
+                capture_count += 1
 
-        acquisition_end = time.time()
-        actual_duration = acquisition_end - acquisition_start
-        capture_count = len(self.lockin_Y)
-        print(f"✓ Captured {capture_count} buffers")
+        acquisition_end_time = time.time()
+        actual_duration = acquisition_end_time - acquisition_start_time
 
-        # Concatenate all buffers
-        all_Y_raw = np.concatenate(self.lockin_Y)
+        print(f"✓ Captured {capture_count} scope buffers")
+
+        # Combine all the data
+        all_X_raw = np.concatenate(self.lockin_X)
         all_ramp_raw = np.concatenate(self.dc_ramp)
 
-        # Apply gain correction to Y
-        all_Y = all_Y_raw * self.input_gain_factor
+        # Apply gain correction to X
+        all_X = all_X_raw * self.input_gain_factor
 
-        # Apply averaging if requested
-        w = params.get('averaging_window', 1)
-        if w > 1:
-            all_Y = np.convolve(all_Y, np.ones(w) / w, mode='valid')
-            all_ramp_raw = np.convolve(all_ramp_raw, np.ones(w) / w, mode='valid')
-            print(f"Applied {w}-sample moving average")
+        # Smooth it out if requested
+        averaging_window = params.get('averaging_window', 1)
+        if averaging_window > 1:
+            all_X = np.convolve(all_X, np.ones(averaging_window) / averaging_window, mode='valid')
+            all_ramp_raw = np.convolve(all_ramp_raw, np.ones(averaging_window) / averaging_window, mode='valid')
+            print(f"Applied {averaging_window}-sample moving average")
 
-        n_samples = len(all_Y)
-
-        # Use sample-based indexing (matches lock-in, better for sync)
+        # Make time axis
+        n_samples = len(all_X)
         sample_index = np.arange(n_samples)
         t = sample_index / (n_samples / actual_duration)
 
-        effective_sample_rate = n_samples / actual_duration
-
-        # Buffer timing diagnostics
-        samples_per_buffer = n_samples / capture_count
-        data_time_per_buffer = samples_per_buffer / self.nominal_sample_rate
-        buffer_spacing = actual_duration / capture_count
-        dead_time = buffer_spacing - data_time_per_buffer
-
-        # Print summary
+        # Show results
         print("\n" + "=" * 60)
-        print("LOCK-IN Y COMPONENT + DC RAMP RESULTS")
+        print("LOCK-IN X COMPONENT + DC RAMP RESULTS")
         print("=" * 60)
         print(f"Mode: {self.input_mode}")
         print(f"Gain correction: {self.input_gain_factor:.4f}x")
         print(f"DC offset correction: {self.input_dc_offset:.6f}V")
         print(f"Duration: {actual_duration:.3f}s")
-        print(f"Samples: {n_samples}")
-        print(f"Effective sample rate: {effective_sample_rate:.2f} Hz")
-        print(f"Mean Y: {np.mean(all_Y):.6f} V")
-        print(f"Std dev: {np.std(all_Y):.6f} V")
-        print(f"DC Ramp range: {np.min(all_ramp_raw):.6f} to {np.max(all_ramp_raw):.6f} V")
-        print("\nBuffer statistics:")
-        print(f"  Buffers: {capture_count}")
+        print(f"Samples collected: {n_samples}")
+        print(f"Effective sample rate: {n_samples / actual_duration:.2f} Hz")
+
+        # Buffer timing stats
+        samples_per_buffer = n_samples / capture_count
+        time_per_buffer = actual_duration / capture_count
+        data_time_per_buffer = samples_per_buffer / self.nominal_sample_rate
+        gap_per_buffer = time_per_buffer - data_time_per_buffer
+
+        print(f"\nBuffer statistics:")
+        print(f"  Buffers captured: {capture_count}")
         print(f"  Samples per buffer: {samples_per_buffer:.0f}")
         print(f"  Data time per buffer: {data_time_per_buffer:.3f}s")
-        print(f"  Gap per buffer: {dead_time * 1000:.1f} ms")
-        print(f"  Dead time: {dead_time * capture_count:.2f}s ({dead_time * capture_count / actual_duration * 100:.1f}%)")
+        print(f"  Gap between buffers: {gap_per_buffer * 1000:.1f}ms")
+        print(
+            f"  Dead time: {gap_per_buffer * capture_count:.2f}s ({gap_per_buffer * capture_count / actual_duration * 100:.1f}%)")
+
+        print(f"\nMean X: {np.mean(all_X):.6f} ± {np.std(all_X):.6f} V")
+        print(f"DC Ramp range: {np.min(all_ramp_raw):.6f} to {np.max(all_ramp_raw):.6f} V")
         print("=" * 60)
 
-        # Make plots
-        fig = plt.figure(figsize=(14, 8))
+        # Grab raw signals for plots
+        self.scope.input1 = 'out1'
+        self.scope.input2 = 'in1'
+        time.sleep(0.05)
+        self.scope.single()
+        out1_raw = np.array(self.scope._data_ch1_current)
+        in1_raw_uncorrected = np.array(self.scope._data_ch2_current)
+        in1_raw = (in1_raw_uncorrected - self.input_dc_offset) * self.input_gain_factor
 
-        # Y vs Time
-        ax1 = plt.subplot(2, 2, 1)
-        ax1.plot(t, all_Y, 'r-', linewidth=0.5)
-        ax1.axhline(np.mean(all_Y), color='b', linestyle='--', label=f'Mean: {np.mean(all_Y):.6f}V')
-        ax1.set_xlabel('Time (s)')
-        ax1.set_ylabel('Y (V)')
-        ax1.set_title('Quadrature (Y) vs Time')
-        ax1.legend()
+        # Put scope back to lock-in X and DC ramp
+        self.scope.input1 = 'iq2'
+        self.scope.input2 = 'in2'
+
+        # Calculate magnitude (just X for this logger, no Y available)
+        R_x = np.abs(all_X)
+
+        # Make plots - 3x3 layout matching original
+        fig = plt.figure(figsize=(16, 10))
+
+        t_raw_corrected = np.linspace(0, len(out1_raw) / self.nominal_sample_rate, len(out1_raw))
+
+        # Reference signal
+        ax1 = plt.subplot(3, 3, 1)
+        n_periods = 5
+        n_plot = min(int(n_periods * self.nominal_sample_rate / self.ref_freq), len(out1_raw))
+        ax1.plot(t_raw_corrected[:n_plot] * 1000, out1_raw[:n_plot], 'b-', linewidth=1)
+        ax1.set_xlabel('Time (ms)')
+        ax1.set_ylabel('OUT1 (V)')
+        ax1.set_title(f'Reference @ {self.ref_freq} Hz')
         ax1.grid(True)
 
-        # DC Ramp vs Time
-        ax2 = plt.subplot(2, 2, 2)
-        ax2.plot(t, all_ramp_raw, 'g-', linewidth=0.5)
-        ax2.set_xlabel('Time (s)')
-        ax2.set_ylabel('DC Ramp (V)')
-        ax2.set_title('DC Ramp vs Time')
+        # Input signal
+        ax2 = plt.subplot(3, 3, 2)
+        ax2.plot(t_raw_corrected[:n_plot] * 1000, in1_raw[:n_plot], 'r-', linewidth=1)
+        ax2.set_xlabel('Time (ms)')
+        ax2.set_ylabel('IN1 (V, corrected)')
+        ax2.set_title(f'Input - {self.input_mode}')
         ax2.grid(True)
 
-        # Y vs DC Ramp
-        ax3 = plt.subplot(2, 2, 3)
-        ax3.plot(all_ramp_raw, all_Y, 'm-', linewidth=0.5)
-        ax3.set_xlabel('DC Ramp (V)')
-        ax3.set_ylabel('Y (V)')
-        ax3.set_title('Y vs DC Ramp')
+        # DC Ramp vs Time
+        ax3 = plt.subplot(3, 3, 3)
+        ax3.plot(t, all_ramp_raw, 'g-', linewidth=0.5)
+        ax3.set_xlabel('Time (s)')
+        ax3.set_ylabel('DC Ramp (V)')
+        ax3.set_title('DC Ramp (IN2) vs Time')
         ax3.grid(True)
 
-        # Y histogram
-        ax4 = plt.subplot(2, 2, 4)
-        ax4.hist(all_Y, bins=50, alpha=0.7, color='red')
-        ax4.axvline(np.mean(all_Y), color='b', linestyle='--', label=f'Mean: {np.mean(all_Y):.6f}V')
-        ax4.set_xlabel('Y (V)')
-        ax4.set_ylabel('Count')
-        ax4.set_title('Y Distribution')
+        # X vs Time
+        ax4 = plt.subplot(3, 3, 4)
+        ax4.plot(t, all_X, 'b-', linewidth=0.5)
+        ax4.axhline(np.mean(all_X), color='r', linestyle='--', label=f'Mean: {np.mean(all_X):.9f}V')
+        ax4.set_xlabel('Time (s)')
+        ax4.set_ylabel('X (V)')
+        ax4.set_title('In-phase (X)')
         ax4.legend()
         ax4.grid(True)
+        ax4.set_xlim(t[0], t[-1])
+        margin_X = 5 * (np.max(all_X) - np.min(all_X)) if np.max(all_X) != np.min(all_X) else 0.001
+        ax4.set_ylim(np.min(all_X) - margin_X, np.max(all_X) + margin_X)
+
+        # X vs DC Ramp
+        ax5 = plt.subplot(3, 3, 5)
+        ax5.plot(all_ramp_raw, all_X, 'm-', linewidth=0.5)
+        ax5.set_xlabel('DC Ramp (V)')
+        ax5.set_ylabel('X (V)')
+        ax5.set_title('X vs DC Ramp')
+        ax5.grid(True)
+
 
         plt.tight_layout()
 
-        # Save figure and CSV
+        # Save everything
         if params['save_file']:
             if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
 
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            png_path = os.path.join(self.output_dir, f"lockin_y_ramp_{ts}.png")
-            plt.savefig(png_path, dpi=150)
-            print(f"\n✓ Saved plot: {png_path}")
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-            csv_path = os.path.join(self.output_dir, f"lockin_y_ramp_{ts}.csv")
-            with open(csv_path, 'w') as f:
-                f.write("# Red Pitaya Lock-In Y Component + DC Ramp Logger\n")
+            # Save plot
+            img_path = os.path.join(self.output_dir, f'lockin_x_ramp_{timestamp_str}.png')
+            plt.savefig(img_path, dpi=150)
+            print(f"\n✓ Saved plot: {img_path}")
+
+            # Save CSV
+            data = np.column_stack((sample_index, t, all_X, all_ramp_raw))
+            csv_path = os.path.join(self.output_dir, f'lockin_x_ramp_{timestamp_str}.csv')
+
+            with open(csv_path, 'w', newline='') as f:
+                f.write(f"# Red Pitaya Lock-In X Component + DC Ramp Logger\n")
                 f.write(f"# Mode: {self.input_mode}\n")
-                f.write(f"# Gain: {self.input_gain_factor:.6f}\n")
-                f.write(f"# Offset: {self.input_dc_offset:.6f}\n")
-                f.write(f"# Duration: {actual_duration:.6f}\n")
-                f.write(f"# Sample rate: {effective_sample_rate:.3f} Hz\n")
+                f.write(f"# Gain correction: {self.input_gain_factor:.6f}\n")
+                f.write(f"# DC offset correction: {self.input_dc_offset:.6f} V\n")
+                f.write(f"# Reference frequency: {self.ref_freq} Hz\n")
+                f.write(f"# Reference amplitude: {params['ref_amp']} V\n")
+                f.write(f"# Filter bandwidth: {params.get('filter_bandwidth', 10)} Hz\n")
+                f.write(f"# Duration: {actual_duration:.3f} s\n")
                 f.write(f"# Samples: {n_samples}\n")
-                f.write("Index,Time(s),Y(V),DCRamp(V)\n")
-                np.savetxt(f, np.column_stack((sample_index, t, all_Y, all_ramp_raw)), delimiter=",", fmt="%.10f")
+                f.write(f"# Sample rate: {n_samples / actual_duration:.2f} Hz\n")
+                f.write("Index,Time(s),X(V),DCRamp(V)\n")
+                np.savetxt(f, data, delimiter=",", fmt='%.10f')
+
             print(f"✓ Saved data: {csv_path}")
+        else:
+            plt.show()
 
 
-if __name__ == "__main__":
-    rp = RedPitayaLockInYLogger(
+if __name__ == '__main__':
+    rp = RedPitayaLockInLogger(
         output_dir=OUTPUT_DIRECTORY,
         input_mode=INPUT_MODE,
         manual_gain=MANUAL_GAIN_FACTOR,
@@ -433,10 +492,13 @@ if __name__ == "__main__":
 
     run_params = {
         'ref_freq': REF_FREQUENCY,
+        'ref_amp': REF_AMPLITUDE,
+        'output_ref': OUTPUT_CHANNEL,
         'phase': PHASE_OFFSET,
         'timeout': MEASUREMENT_TIME,
         'filter_bandwidth': FILTER_BANDWIDTH,
         'averaging_window': AVERAGING_WINDOW,
+        'output_dir': OUTPUT_DIRECTORY,
         'save_file': SAVE_DATA,
         'auto_calibrate': AUTO_CALIBRATE,
         'calibration_time': CALIBRATION_TIME,
@@ -444,9 +506,9 @@ if __name__ == "__main__":
     }
 
     print("=" * 60)
-    print("RED PITAYA LOCK-IN Y + DC RAMP LOGGER")
+    print("RED PITAYA LOCK-IN X + DC RAMP LOGGER")
     print("=" * 60)
-    print(f"Reference frequency: {REF_FREQUENCY} Hz (listening)")
+    print(f"Reference: {REF_FREQUENCY} Hz @ {REF_AMPLITUDE}V")
     print(f"Filter bandwidth: {FILTER_BANDWIDTH} Hz")
     print(f"Measurement time: {MEASUREMENT_TIME}s")
     print(f"Input mode: {INPUT_MODE}")
