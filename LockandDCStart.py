@@ -105,30 +105,57 @@ def detect_sweep_segments(ramp, min_sweep_fraction=0.7, min_samples=50):
     """
     Split a triangle-wave ramp into individual up/down sweep segments.
 
+    The ramp may have millions of samples but only a handful of triangle cycles.
+    Running find_peaks on the raw array fails because the required 'distance'
+    parameter would need to be in the millions.  Strategy:
+
+      1. Downsample to ~10 000 points so find_peaks sees a clean triangle.
+      2. Detect turning-point indices in the downsampled array.
+      3. Scale those indices back to the original sample grid.
+
     Returns a list of dicts:
         {'indices': array, 'direction': 'up'|'down',
-         'v_start': float, 'v_end': float}
+         'v_start': float, 'v_end': float,
+         'v_min': float, 'v_max': float}
     """
     ramp = np.asarray(ramp, dtype=float)
     n = len(ramp)
-    v_range = np.max(ramp) - np.min(ramp)
+
+    # ── Downsample for peak detection ─────────────────────────────────────
+    TARGET_DS_LEN = 10_000
+    ds_factor = max(1, n // TARGET_DS_LEN)
+    ramp_ds = ramp[::ds_factor]
+    n_ds = len(ramp_ds)
+
+    v_range = np.max(ramp_ds) - np.min(ramp_ds)
+    if v_range < 1e-6:
+        print("  WARNING: Ramp has no voltage variation - cannot detect segments.")
+        return []
+
     min_sweep_height = v_range * min_sweep_fraction
-
-    # Find turning points: local maxima and minima
-    # Use a prominence threshold so noise doesn't create false peaks
     prominence = min_sweep_height * 0.4
+    # Each half-cycle must span at least 1% of the downsampled array
+    min_dist_ds = max(5, n_ds // 200)
 
-    peaks, _   = find_peaks( ramp, prominence=prominence, distance=min_samples)
-    valleys, _ = find_peaks(-ramp, prominence=prominence, distance=min_samples)
+    peaks_ds,   _ = find_peaks( ramp_ds, prominence=prominence, distance=min_dist_ds)
+    valleys_ds, _ = find_peaks(-ramp_ds, prominence=prominence, distance=min_dist_ds)
 
-    # Combine peaks and valleys into a sorted list of turning points
-    turning_points = np.sort(np.concatenate(([0], peaks, valleys, [n - 1])))
-    turning_points = np.unique(turning_points)
+    # Scale back to original indices
+    peaks   = peaks_ds   * ds_factor
+    valleys = valleys_ds * ds_factor
+
+    print(f"    downsample: {ds_factor}x  ({n} -> {n_ds} pts)  "
+          f"peaks: {len(peaks)}  valleys: {len(valleys)}")
+
+    # Build sorted turning-point list including array boundaries
+    turning_points = np.unique(np.sort(
+        np.concatenate(([0], peaks, valleys, [n - 1]))
+    ))
 
     segments = []
     for i in range(len(turning_points) - 1):
-        i0 = turning_points[i]
-        i1 = turning_points[i + 1]
+        i0 = int(turning_points[i])
+        i1 = int(turning_points[i + 1])
         seg_indices = np.arange(i0, i1 + 1)
         if len(seg_indices) < min_samples:
             continue
@@ -139,12 +166,12 @@ def detect_sweep_segments(ramp, min_sweep_fraction=0.7, min_samples=50):
             continue
         direction = 'up' if v_end > v_start else 'down'
         segments.append({
-            'indices': seg_indices,
+            'indices':   seg_indices,
             'direction': direction,
-            'v_start': v_start,
-            'v_end': v_end,
-            'v_min': min(v_start, v_end),
-            'v_max': max(v_start, v_end),
+            'v_start':   v_start,
+            'v_end':     v_end,
+            'v_min':     min(v_start, v_end),
+            'v_max':     max(v_start, v_end),
         })
 
     return segments
@@ -152,23 +179,20 @@ def detect_sweep_segments(ramp, min_sweep_fraction=0.7, min_samples=50):
 
 def bin_sweep(ramp_seg, signal_seg, n_bins, v_min, v_max):
     """
-    Bin a single sweep onto a uniform voltage grid.
+    Bin a single sweep onto a uniform voltage grid (fully vectorized).
     Returns (bin_centers, binned_signal, bin_counts).
     """
-    bin_edges = np.linspace(v_min, v_max, n_bins + 1)
+    bin_edges   = np.linspace(v_min, v_max, n_bins + 1)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    bin_sum    = np.zeros(n_bins)
-    bin_counts = np.zeros(n_bins, dtype=int)
 
-    indices = np.digitize(ramp_seg, bin_edges) - 1
-    indices = np.clip(indices, 0, n_bins - 1)
+    # digitize gives 1-based bin numbers; clip to valid range
+    idx = np.clip(np.digitize(ramp_seg, bin_edges) - 1, 0, n_bins - 1)
 
-    for idx, val in zip(indices, signal_seg):
-        bin_sum[idx]    += val
-        bin_counts[idx] += 1
+    bin_sum    = np.bincount(idx, weights=signal_seg.astype(float), minlength=n_bins)
+    bin_counts = np.bincount(idx,                                    minlength=n_bins)
 
-    mask = bin_counts > 0
     binned = np.full(n_bins, np.nan)
+    mask = bin_counts > 0
     binned[mask] = bin_sum[mask] / bin_counts[mask]
 
     return bin_centers, binned, bin_counts
@@ -403,21 +427,26 @@ ax2.set_title('Lock-in Y + DC Ramp (RP2)', fontsize=13, fontweight='bold')
 
 # ── Segment detection diagnostic ──────────────────────────
 ax_diag = plt.subplot2grid((3, 3), (0, 2))
-# Show a short stretch of each ramp with segment boundaries
-n_diag = min(50000, len(ramp_x), len(ramp_y))
-ax_diag.plot(ramp_x[:n_diag], 'b-', linewidth=0.4, alpha=0.7, label='X ramp')
-ax_diag.plot(ramp_y[:n_diag], 'r-', linewidth=0.4, alpha=0.7, label='Y ramp')
+# Downsample both ramps to ~10k points so the triangle shape is visible
+diag_ds = max(1, min(len(ramp_x), len(ramp_y)) // 10_000)
+rx_ds = ramp_x[::diag_ds]
+ry_ds = ramp_y[::diag_ds]
+t_x = np.arange(len(rx_ds)) * diag_ds
+t_y = np.arange(len(ry_ds)) * diag_ds
+ax_diag.plot(t_x, rx_ds, 'b-', linewidth=0.6, alpha=0.8, label='X ramp')
+ax_diag.plot(t_y, ry_ds, 'r-', linewidth=0.6, alpha=0.8, label='Y ramp')
+# Mark segment boundaries
 for seg in x_segs:
-    i0 = seg['indices'][0]
-    if i0 < n_diag:
-        ax_diag.axvline(i0, color='b', linewidth=0.5, alpha=0.4)
+    ax_diag.axvline(seg['indices'][0],  color='b', linewidth=0.8, alpha=0.5, linestyle='--')
+    ax_diag.axvline(seg['indices'][-1], color='b', linewidth=0.8, alpha=0.5, linestyle=':')
 for seg in y_segs:
-    i0 = seg['indices'][0]
-    if i0 < n_diag:
-        ax_diag.axvline(i0, color='r', linewidth=0.5, alpha=0.4)
+    ax_diag.axvline(seg['indices'][0],  color='r', linewidth=0.8, alpha=0.5, linestyle='--')
+    ax_diag.axvline(seg['indices'][-1], color='r', linewidth=0.8, alpha=0.5, linestyle=':')
 ax_diag.set_xlabel('Sample index', fontsize=10)
 ax_diag.set_ylabel('DC Ramp (V)', fontsize=10)
-ax_diag.set_title('Ramp Segments (first 50k samples)', fontsize=11, fontweight='bold')
+n_x_segs = len(x_segs)
+n_y_segs = len(y_segs)
+ax_diag.set_title(f'Ramp Segments  (X: {n_x_segs}, Y: {n_y_segs})', fontsize=11, fontweight='bold')
 ax_diag.legend(fontsize=9)
 ax_diag.grid(True, alpha=0.3)
 
