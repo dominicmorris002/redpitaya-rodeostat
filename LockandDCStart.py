@@ -1,11 +1,17 @@
 """
 Synchronous dual Red Pitaya data acquisition - DC Ramp Synchronized
-Launches X+Ramp and Y+Ramp loggers, then merges data using DC ramp as common reference
+Launches X+Ramp and Y+Ramp loggers, then merges data using DC ramp as common reference.
 
 Hardware Setup:
-- DC Ramp → IN2 on BOTH Red Pitayas
+- DC Ramp (triangle wave) → IN2 on BOTH Red Pitayas
 - Lock-in X output → RP1 (reads on iq2)
 - Lock-in Y output → RP2 (reads on iq2_2)
+
+Merging strategy:
+  - Detects individual triangle sweep segments (up and down) from both ramps
+  - Matches X and Y samples within each sweep by nearest DC voltage
+  - Handles timing offsets between the two devices
+  - Averages across repeated cycles for noise reduction
 """
 
 import subprocess
@@ -19,6 +25,7 @@ from matplotlib import pyplot as plt
 from matplotlib.image import imread
 import glob
 from scipy import interpolate
+from scipy.signal import find_peaks
 
 # ============================================================
 # SYNCHRONIZATION PARAMETERS
@@ -26,15 +33,23 @@ from scipy import interpolate
 START_DELAY = 5  # seconds
 OUTPUT_DIRECTORY = 'test_data'
 
-# DC Ramp scaling (must match what's in the individual scripts)
-RAMP_GAIN = -28.93002007
-RAMP_OFFSET = -0.016903
+# IN2 DC Ramp scaling - must match LockXandDC.py and LockYandDC.py
+IN2_GAIN_FACTOR = 1.0    # same as IN2_GAIN_FACTOR in both logger scripts
+IN2_DC_OFFSET = 0.0      # same as IN2_DC_OFFSET in both logger scripts
 
-# Create synchronized start time
-START_TIME = datetime.now() + pd.Timedelta(seconds=START_DELAY)
+# Triangle wave detection tuning
+# Minimum fraction of the ramp voltage range that counts as a full sweep
+MIN_SWEEP_FRACTION = 0.7
+# How many voltage bins to use when averaging a sweep
+N_VOLTAGE_BINS = 500
+# Minimum number of samples a segment needs to be kept
+MIN_SEGMENT_SAMPLES = 50
+
+# ============================================================
+
 START_TIME_FILE = "start_time.txt"
+START_TIME = datetime.now() + pd.Timedelta(seconds=START_DELAY)
 
-# Write start time to file for both scripts to read
 with open(START_TIME_FILE, "w") as f:
     f.write(START_TIME.isoformat())
 
@@ -43,17 +58,13 @@ print("DUAL RED PITAYA - DC RAMP SYNCHRONIZED ACQUISITION")
 print("=" * 60)
 print(f"Start time: {START_TIME.strftime('%Y-%m-%d %H:%M:%S.%f')}")
 print(f"Waiting {(START_TIME - datetime.now()).total_seconds():.1f}s...")
-print(f"Ramp scaling: {RAMP_GAIN:.4f}x gain, {RAMP_OFFSET:.6f}V offset")
+print(f"IN2 ramp scaling: gain={IN2_GAIN_FACTOR:.4f}x, offset={IN2_DC_OFFSET:.6f}V")
 print("=" * 60)
 
-# Get Python executable from virtual environment
 python_exe = sys.executable
-
-# Paths to scripts
 x_script = os.path.join(os.path.dirname(__file__), "LockXandDC.py")
 y_script = os.path.join(os.path.dirname(__file__), "LockYandDC.py")
 
-# Check that scripts exist
 if not os.path.exists(x_script):
     print(f"❌ Error: {x_script} not found!")
     sys.exit(1)
@@ -61,23 +72,18 @@ if not os.path.exists(y_script):
     print(f"❌ Error: {y_script} not found!")
     sys.exit(1)
 
-# Wait until start time
 while datetime.now() < START_TIME:
     time.sleep(0.001)
 
 print("\n🚀 Launching both acquisitions...")
-
-# Launch both scripts simultaneously
 proc_x = subprocess.Popen([python_exe, x_script])
 proc_y = subprocess.Popen([python_exe, y_script])
 
-# Wait for both to finish
 print("⏳ Waiting for acquisitions to complete...")
 proc_x.wait()
 proc_y.wait()
 print("\n✓ Both acquisitions finished")
 
-# Clean up sync file
 try:
     os.remove(START_TIME_FILE)
 except:
@@ -85,11 +91,161 @@ except:
 
 time.sleep(0.5)
 
+
 # ============================================================
-# DC RAMP-BASED MERGING
+# HELPER FUNCTIONS
 # ============================================================
 
-# Find latest files
+def apply_ramp_scaling(raw_voltage, gain, offset):
+    """Apply the same IN2 correction used in the logger scripts."""
+    return (raw_voltage - offset) * gain
+
+
+def detect_sweep_segments(ramp, min_sweep_fraction=0.7, min_samples=50):
+    """
+    Split a triangle-wave ramp into individual up/down sweep segments.
+
+    Returns a list of dicts:
+        {'indices': array, 'direction': 'up'|'down',
+         'v_start': float, 'v_end': float}
+    """
+    ramp = np.asarray(ramp, dtype=float)
+    n = len(ramp)
+    v_range = np.max(ramp) - np.min(ramp)
+    min_sweep_height = v_range * min_sweep_fraction
+
+    # Find turning points: local maxima and minima
+    # Use a prominence threshold so noise doesn't create false peaks
+    prominence = min_sweep_height * 0.4
+
+    peaks, _   = find_peaks( ramp, prominence=prominence, distance=min_samples)
+    valleys, _ = find_peaks(-ramp, prominence=prominence, distance=min_samples)
+
+    # Combine peaks and valleys into a sorted list of turning points
+    turning_points = np.sort(np.concatenate(([0], peaks, valleys, [n - 1])))
+    turning_points = np.unique(turning_points)
+
+    segments = []
+    for i in range(len(turning_points) - 1):
+        i0 = turning_points[i]
+        i1 = turning_points[i + 1]
+        seg_indices = np.arange(i0, i1 + 1)
+        if len(seg_indices) < min_samples:
+            continue
+        v_start = ramp[i0]
+        v_end   = ramp[i1]
+        sweep_height = abs(v_end - v_start)
+        if sweep_height < min_sweep_height:
+            continue
+        direction = 'up' if v_end > v_start else 'down'
+        segments.append({
+            'indices': seg_indices,
+            'direction': direction,
+            'v_start': v_start,
+            'v_end': v_end,
+            'v_min': min(v_start, v_end),
+            'v_max': max(v_start, v_end),
+        })
+
+    return segments
+
+
+def bin_sweep(ramp_seg, signal_seg, n_bins, v_min, v_max):
+    """
+    Bin a single sweep onto a uniform voltage grid.
+    Returns (bin_centers, binned_signal, bin_counts).
+    """
+    bin_edges = np.linspace(v_min, v_max, n_bins + 1)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    bin_sum    = np.zeros(n_bins)
+    bin_counts = np.zeros(n_bins, dtype=int)
+
+    indices = np.digitize(ramp_seg, bin_edges) - 1
+    indices = np.clip(indices, 0, n_bins - 1)
+
+    for idx, val in zip(indices, signal_seg):
+        bin_sum[idx]    += val
+        bin_counts[idx] += 1
+
+    mask = bin_counts > 0
+    binned = np.full(n_bins, np.nan)
+    binned[mask] = bin_sum[mask] / bin_counts[mask]
+
+    return bin_centers, binned, bin_counts
+
+
+def merge_segments_by_voltage(x_segs, y_segs, ramp_x, ramp_y,
+                               x_signal, y_signal,
+                               n_bins=500, min_sweep_fraction=0.7):
+    """
+    For each pair of matching (direction, approximate voltage range) segments,
+    bin both onto the same voltage grid and pair them up.
+
+    Returns arrays: (voltage, X_merged, Y_merged) already averaged over cycles.
+    """
+    # Global voltage overlap
+    global_v_min = max(np.min(ramp_x), np.min(ramp_y))
+    global_v_max = min(np.max(ramp_x), np.max(ramp_y))
+    print(f"  Global ramp overlap: {global_v_min:.4f} → {global_v_max:.4f} V")
+
+    # Bucket segments by direction
+    x_up   = [s for s in x_segs if s['direction'] == 'up']
+    x_down = [s for s in x_segs if s['direction'] == 'down']
+    y_up   = [s for s in y_segs if s['direction'] == 'up']
+    y_down = [s for s in y_segs if s['direction'] == 'down']
+
+    print(f"  X sweeps — up: {len(x_up)}, down: {len(x_down)}")
+    print(f"  Y sweeps — up: {len(y_up)}, down: {len(y_down)}")
+
+    bin_edges = np.linspace(global_v_min, global_v_max, n_bins + 1)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    results = {}  # direction → {'X_stack': [], 'Y_stack': []}
+
+    for direction, x_list, y_list in [('up', x_up, y_up), ('down', x_down, y_down)]:
+        if not x_list or not y_list:
+            continue
+
+        x_stack = []
+        y_stack = []
+
+        # Bin every X sweep onto the common grid
+        for seg in x_list:
+            idx = seg['indices']
+            _, binned, counts = bin_sweep(
+                ramp_x[idx], x_signal[idx], n_bins, global_v_min, global_v_max)
+            if np.sum(counts > 0) > n_bins * 0.3:   # at least 30% coverage
+                x_stack.append(binned)
+
+        # Bin every Y sweep onto the common grid
+        for seg in y_list:
+            idx = seg['indices']
+            _, binned, counts = bin_sweep(
+                ramp_y[idx], y_signal[idx], n_bins, global_v_min, global_v_max)
+            if np.sum(counts > 0) > n_bins * 0.3:
+                y_stack.append(binned)
+
+        if not x_stack or not y_stack:
+            continue
+
+        # Average across cycles (nanmean ignores empty bins)
+        X_avg = np.nanmean(np.array(x_stack), axis=0)
+        Y_avg = np.nanmean(np.array(y_stack), axis=0)
+
+        results[direction] = {
+            'voltage': bin_centers,
+            'X': X_avg,
+            'Y': Y_avg,
+            'n_x_sweeps': len(x_stack),
+            'n_y_sweeps': len(y_stack),
+        }
+
+    return results
+
+
+# ============================================================
+# LOAD DATA
+# ============================================================
 try:
     x_csv = max(glob.glob(os.path.join(OUTPUT_DIRECTORY, 'lockin_x_ramp_*.csv')), key=os.path.getctime)
     y_csv = max(glob.glob(os.path.join(OUTPUT_DIRECTORY, 'lockin_y_ramp_*.csv')), key=os.path.getctime)
@@ -102,251 +258,267 @@ except ValueError:
 print("\n" + "=" * 60)
 print("MERGING DATA USING DC RAMP REFERENCE")
 print("=" * 60)
+print(f"X file: {os.path.basename(x_csv)}")
+print(f"Y file: {os.path.basename(y_csv)}")
 
-# Load CSVs
 x_data = pd.read_csv(x_csv, comment='#', encoding='latin-1')
 y_data = pd.read_csv(y_csv, comment='#', encoding='latin-1')
 
-n_x = len(x_data)
-n_y = len(y_data)
+print(f"X samples: {len(x_data)},  Y samples: {len(y_data)}")
 
-print(f"X component samples: {n_x}")
-print(f"Y component samples: {n_y}")
+# Apply IN2 scaling (same parameters as in the logger scripts)
+ramp_x = apply_ramp_scaling(x_data['DCRamp(V)'].values, IN2_GAIN_FACTOR, IN2_DC_OFFSET)
+ramp_y = apply_ramp_scaling(y_data['DCRamp(V)'].values, IN2_GAIN_FACTOR, IN2_DC_OFFSET)
 
-# Apply ramp scaling to both
-ramp_x = (x_data['DCRamp(V)'].values - RAMP_OFFSET) * RAMP_GAIN
-ramp_y = (y_data['DCRamp(V)'].values - RAMP_OFFSET) * RAMP_GAIN
+x_signal = x_data['X(V)'].values
+y_signal = y_data['Y(V)'].values
 
-print(f"\nX ramp range: {np.min(ramp_x):.6f} to {np.max(ramp_x):.6f} V")
-print(f"Y ramp range: {np.min(ramp_y):.6f} to {np.max(ramp_y):.6f} V")
+print(f"\nX ramp range: {np.min(ramp_x):.4f} → {np.max(ramp_x):.4f} V")
+print(f"Y ramp range: {np.min(ramp_y):.4f} → {np.max(ramp_y):.4f} V")
 
-# Find overlapping ramp region
-ramp_min = max(np.min(ramp_x), np.min(ramp_y))
-ramp_max = min(np.max(ramp_x), np.max(ramp_y))
+# ============================================================
+# DETECT TRIANGLE SWEEP SEGMENTS
+# ============================================================
+print("\nDetecting triangle sweep segments...")
+x_segs = detect_sweep_segments(ramp_x, MIN_SWEEP_FRACTION, MIN_SEGMENT_SAMPLES)
+y_segs = detect_sweep_segments(ramp_y, MIN_SWEEP_FRACTION, MIN_SEGMENT_SAMPLES)
 
-print(f"Overlapping ramp range: {ramp_min:.6f} to {ramp_max:.6f} V")
+print(f"  X: found {len(x_segs)} segments  "
+      f"({sum(1 for s in x_segs if s['direction']=='up')} up, "
+      f"{sum(1 for s in x_segs if s['direction']=='down')} down)")
+print(f"  Y: found {len(y_segs)} segments  "
+      f"({sum(1 for s in y_segs if s['direction']=='up')} up, "
+      f"({sum(1 for s in y_segs if s['direction']=='down')} down)")
 
-# Filter to overlapping region
-mask_x = (ramp_x >= ramp_min) & (ramp_x <= ramp_max)
-mask_y = (ramp_y >= ramp_min) & (ramp_y <= ramp_max)
+if not x_segs or not y_segs:
+    print("⚠ WARNING: No sweep segments detected. "
+          "Check MIN_SWEEP_FRACTION or MIN_SEGMENT_SAMPLES.")
+    sys.exit(1)
 
-ramp_x_overlap = ramp_x[mask_x]
-x_overlap = x_data['X(V)'].values[mask_x]
+# ============================================================
+# MERGE BY VOLTAGE BINNING
+# ============================================================
+print("\nMerging sweeps by voltage binning...")
+merged = merge_segments_by_voltage(
+    x_segs, y_segs, ramp_x, ramp_y,
+    x_signal, y_signal,
+    n_bins=N_VOLTAGE_BINS,
+    min_sweep_fraction=MIN_SWEEP_FRACTION
+)
 
-ramp_y_overlap = ramp_y[mask_y]
-y_overlap = y_data['Y(V)'].values[mask_y]
+if not merged:
+    print("❌ No matching sweep pairs found! Check your ramp data.")
+    sys.exit(1)
 
-print(f"\nX samples in overlap: {len(ramp_x_overlap)}")
-print(f"Y samples in overlap: {len(ramp_y_overlap)}")
+# Combine up and down sweeps into one dataset (or keep separate if preferred)
+all_voltages = []
+all_X        = []
+all_Y        = []
+all_dirs     = []
 
-# Decide which has fewer samples - use that as reference
-if len(ramp_x_overlap) <= len(ramp_y_overlap):
-    # Use X ramp as reference, interpolate Y onto it
-    print("\n✓ Using X ramp as reference, interpolating Y")
+for direction, res in merged.items():
+    v   = res['voltage']
+    X   = res['X']
+    Y   = res['Y']
+    # Only keep bins that have valid data in BOTH X and Y
+    valid = ~np.isnan(X) & ~np.isnan(Y)
+    all_voltages.append(v[valid])
+    all_X.append(X[valid])
+    all_Y.append(Y[valid])
+    all_dirs.extend([direction] * np.sum(valid))
+    print(f"  {direction.upper()} sweep: {np.sum(valid)} valid voltage bins, "
+          f"averaged over {res['n_x_sweeps']} X / {res['n_y_sweeps']} Y cycles")
 
-    # Sort X by ramp voltage
-    sort_idx_x = np.argsort(ramp_x_overlap)
-    ramp_ref = ramp_x_overlap[sort_idx_x]
-    x_ref = x_overlap[sort_idx_x]
+voltage_merged = np.concatenate(all_voltages)
+X_merged       = np.concatenate(all_X)
+Y_merged       = np.concatenate(all_Y)
 
-    # Sort Y by ramp voltage
-    sort_idx_y = np.argsort(ramp_y_overlap)
-    ramp_y_sorted = ramp_y_overlap[sort_idx_y]
-    y_sorted = y_overlap[sort_idx_y]
+# Sort by voltage for clean plots
+sort_idx       = np.argsort(voltage_merged)
+voltage_merged = voltage_merged[sort_idx]
+X_merged       = X_merged[sort_idx]
+Y_merged       = Y_merged[sort_idx]
 
-    # Interpolate Y values onto X's ramp positions
-    interp_func = interpolate.interp1d(ramp_y_sorted, y_sorted,
-                                       kind='linear',
-                                       bounds_error=False,
-                                       fill_value='extrapolate')
-    y_ref = interp_func(ramp_ref)
+R_merged     = np.sqrt(X_merged**2 + Y_merged**2)
+Theta_merged = np.degrees(np.arctan2(Y_merged, X_merged))
+n_merged     = len(voltage_merged)
 
-else:
-    # Use Y ramp as reference, interpolate X onto it
-    print("\n✓ Using Y ramp as reference, interpolating X")
+print(f"\nTotal merged data points: {n_merged}")
+print(f"Mean R:     {np.nanmean(R_merged):.6f} ± {np.nanstd(R_merged):.6f} V")
+print(f"Mean X:     {np.nanmean(X_merged):.6f} ± {np.nanstd(X_merged):.6f} V")
+print(f"Mean Y:     {np.nanmean(Y_merged):.6f} ± {np.nanstd(Y_merged):.6f} V")
+print(f"Mean Theta: {np.nanmean(Theta_merged):.3f} ± {np.nanstd(Theta_merged):.3f}°")
 
-    # Sort Y by ramp voltage
-    sort_idx_y = np.argsort(ramp_y_overlap)
-    ramp_ref = ramp_y_overlap[sort_idx_y]
-    y_ref = y_overlap[sort_idx_y]
+# ============================================================
+# SAVE MERGED CSV
+# ============================================================
+timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Sort X by ramp voltage
-    sort_idx_x = np.argsort(ramp_x_overlap)
-    ramp_x_sorted = ramp_x_overlap[sort_idx_x]
-    x_sorted = x_overlap[sort_idx_x]
-
-    # Interpolate X values onto Y's ramp positions
-    interp_func = interpolate.interp1d(ramp_x_sorted, x_sorted,
-                                       kind='linear',
-                                       bounds_error=False,
-                                       fill_value='extrapolate')
-    x_ref = interp_func(ramp_ref)
-
-# Calculate R and Theta
-R = np.sqrt(x_ref ** 2 + y_ref ** 2)
-Theta = np.degrees(np.arctan2(y_ref, x_ref))
-
-n_merged = len(ramp_ref)
-
-print(f"\nMerged data points: {n_merged}")
-print(f"\nMerged Statistics:")
-print(f"  Mean R: {np.mean(R):.6f} ± {np.std(R):.6f} V")
-print(f"  Mean X: {np.mean(x_ref):.6f} ± {np.std(x_ref):.6f} V")
-print(f"  Mean Y: {np.mean(y_ref):.6f} ± {np.std(y_ref):.6f} V")
-print(f"  Mean Theta: {np.mean(Theta):.3f} ± {np.std(Theta):.3f}°")
-print(f"  DC Ramp span: {np.max(ramp_ref) - np.min(ramp_ref):.6f} V")
-
-# Create merged dataframe
 merged_df = pd.DataFrame({
-    'Index': np.arange(n_merged),
-    'DC_Voltage': ramp_ref,
-    'R': R,
-    'Theta': Theta,
-    'X': x_ref,
-    'Y': y_ref
+    'Index':      np.arange(n_merged),
+    'DC_Voltage': voltage_merged,
+    'R':          R_merged,
+    'Theta':      Theta_merged,
+    'X':          X_merged,
+    'Y':          Y_merged,
 })
 
-# Save merged CSV
-timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 merged_csv = os.path.join(OUTPUT_DIRECTORY, f'ramp_sync_combined_{timestamp_str}.csv')
 merged_df.to_csv(merged_csv, index=False)
 print(f"\n✓ Saved merged CSV: {merged_csv}")
 
+# Also save per-direction CSVs if both directions exist
+for direction, res in merged.items():
+    v = res['voltage']
+    X = res['X']
+    Y = res['Y']
+    valid = ~np.isnan(X) & ~np.isnan(Y)
+    R_dir = np.sqrt(X[valid]**2 + Y[valid]**2)
+    T_dir = np.degrees(np.arctan2(Y[valid], X[valid]))
+    df_dir = pd.DataFrame({
+        'DC_Voltage': v[valid],
+        'R': R_dir, 'Theta': T_dir,
+        'X': X[valid], 'Y': Y[valid]
+    })
+    dir_csv = os.path.join(OUTPUT_DIRECTORY,
+                           f'ramp_sync_{direction}_{timestamp_str}.csv')
+    df_dir.to_csv(dir_csv, index=False)
+    print(f"✓ Saved {direction} sweep CSV: {dir_csv}")
+
 # ============================================================
-# CREATE ACCV-STYLE COMBINED PLOT
+# PLOTS
 # ============================================================
 fig = plt.figure(figsize=(20, 12))
 
-# Top row: Original plots side by side + FFT
-ax1 = plt.subplot2grid((3, 3), (0, 0), colspan=1)
-img_x = imread(x_png)
-ax1.imshow(img_x)
+# ── Row 0: original subplot images ────────────────────────
+ax1 = plt.subplot2grid((3, 3), (0, 0))
+ax1.imshow(imread(x_png))
 ax1.axis('off')
-ax1.set_title('Lock-in X Component + DC Ramp (RP1)',
-              fontsize=14, fontweight='bold', pad=10)
+ax1.set_title('Lock-in X + DC Ramp (RP1)', fontsize=13, fontweight='bold')
 
-ax2 = plt.subplot2grid((3, 3), (0, 1), colspan=1)
-img_y = imread(y_png)
-ax2.imshow(img_y)
+ax2 = plt.subplot2grid((3, 3), (0, 1))
+ax2.imshow(imread(y_png))
 ax2.axis('off')
-ax2.set_title('Lock-in Y Component + DC Ramp (RP2)',
-              fontsize=14, fontweight='bold', pad=10)
+ax2.set_title('Lock-in Y + DC Ramp (RP2)', fontsize=13, fontweight='bold')
 
-# FFT Analysis
-ax3 = plt.subplot2grid((3, 3), (0, 2))
-# Perform FFT on merged IQ data
-iq = x_ref + 1j * y_ref
-n_pts = len(iq)
-win = np.hanning(n_pts)
-IQwin = iq * win
-IQfft = np.fft.fftshift(np.fft.fft(IQwin))
-# Create frequency axis based on ramp span
-ramp_span = np.max(ramp_ref) - np.min(ramp_ref)
-freqs_lock = np.fft.fftshift(np.fft.fftfreq(n_pts, ramp_span / n_pts))
-psd_lock = (np.abs(IQfft) ** 2) / (n_pts * np.sum(win ** 2))
+# ── Segment detection diagnostic ──────────────────────────
+ax_diag = plt.subplot2grid((3, 3), (0, 2))
+# Show a short stretch of each ramp with segment boundaries
+n_diag = min(50000, len(ramp_x), len(ramp_y))
+ax_diag.plot(ramp_x[:n_diag], 'b-', linewidth=0.4, alpha=0.7, label='X ramp')
+ax_diag.plot(ramp_y[:n_diag], 'r-', linewidth=0.4, alpha=0.7, label='Y ramp')
+for seg in x_segs:
+    i0 = seg['indices'][0]
+    if i0 < n_diag:
+        ax_diag.axvline(i0, color='b', linewidth=0.5, alpha=0.4)
+for seg in y_segs:
+    i0 = seg['indices'][0]
+    if i0 < n_diag:
+        ax_diag.axvline(i0, color='r', linewidth=0.5, alpha=0.4)
+ax_diag.set_xlabel('Sample index', fontsize=10)
+ax_diag.set_ylabel('DC Ramp (V)', fontsize=10)
+ax_diag.set_title('Ramp Segments (first 50k samples)', fontsize=11, fontweight='bold')
+ax_diag.legend(fontsize=9)
+ax_diag.grid(True, alpha=0.3)
 
-ax3.semilogy(freqs_lock, psd_lock, label='Lock-in PSD')
-ax3.set_xlabel('Frequency (Hz)', fontsize=11, fontweight='bold')
-ax3.set_ylabel('Power', fontsize=11, fontweight='bold')
-ax3.set_title('FFT of Demodulated Signal', fontsize=13, fontweight='bold')
-ax3.legend()
-ax3.grid(True, alpha=0.3)
-
-# Middle row: IQ plot, R vs Time, Theta vs Time
-# IQ Plot (X vs Y)
+# ── Row 1: IQ, R vs Voltage, Theta vs Voltage ─────────────
 ax4 = plt.subplot2grid((3, 3), (1, 0))
-ax4.plot(merged_df['X'], merged_df['Y'], 'g.', markersize=1, alpha=0.5)
-ax4.plot(np.mean(merged_df['X']), np.mean(merged_df['Y']), 'r+',
+# colour by direction if both present
+if len(merged) == 2:
+    for direction, res in merged.items():
+        v = res['voltage']
+        X = res['X']
+        Y = res['Y']
+        valid = ~np.isnan(X) & ~np.isnan(Y)
+        col = 'steelblue' if direction == 'up' else 'tomato'
+        ax4.plot(X[valid], Y[valid], '.', color=col, markersize=1,
+                 alpha=0.5, label=direction)
+    ax4.legend(fontsize=9, markerscale=5)
+else:
+    ax4.plot(X_merged, Y_merged, 'g.', markersize=1, alpha=0.5)
+ax4.plot(np.nanmean(X_merged), np.nanmean(Y_merged), 'r+',
          markersize=15, markeredgewidth=2, label='Mean')
-ax4.set_xlabel('X (V)', fontsize=12, fontweight='bold')
-ax4.set_ylabel('Y (V)', fontsize=12, fontweight='bold')
-ax4.set_title('IQ Plot', fontsize=13, fontweight='bold')
+ax4.set_xlabel('X (V)', fontsize=11, fontweight='bold')
+ax4.set_ylabel('Y (V)', fontsize=11, fontweight='bold')
+ax4.set_title('IQ Plot', fontsize=12, fontweight='bold')
 ax4.grid(True, alpha=0.3)
-ax4.legend()
 ax4.axis('equal')
 
-# R vs Time (use index as proxy for time)
 ax5 = plt.subplot2grid((3, 3), (1, 1))
-t_merged = merged_df['Index'].values
-ax5.plot(t_merged, merged_df['R'] * 1e6, 'm-', linewidth=0.5)
-ax5.axhline(np.mean(merged_df['R']) * 1e6, color='b', linestyle='--',
-            label=f"Mean: {np.mean(merged_df['R']) * 1e6:.6f}μA")
-ax5.set_xlabel('Sample Index', fontsize=12, fontweight='bold')
-ax5.set_ylabel('R (μA)', fontsize=12, fontweight='bold')
-ax5.set_title('Magnitude (R)', fontsize=13, fontweight='bold')
-ax5.legend()
+ax5.plot(voltage_merged, R_merged * 1e6, 'm-', linewidth=1.0)
+ax5.set_xlabel('DC Ramp (V)', fontsize=11, fontweight='bold')
+ax5.set_ylabel('R (μA)', fontsize=11, fontweight='bold')
+ax5.set_title('Magnitude R vs DC Voltage', fontsize=12, fontweight='bold')
 ax5.grid(True, alpha=0.3)
 
-# Theta vs Time
 ax6 = plt.subplot2grid((3, 3), (1, 2))
-ax6.plot(t_merged, merged_df['Theta'], 'c-', linewidth=0.5)
-ax6.axhline(np.mean(merged_df['Theta']), color='r', linestyle='--',
-            label=f"Mean: {np.mean(merged_df['Theta']):.3f}°")
-ax6.set_xlabel('Sample Index', fontsize=12, fontweight='bold')
-ax6.set_ylabel('Theta (°)', fontsize=12, fontweight='bold')
-ax6.set_title('Phase (Theta)', fontsize=13, fontweight='bold')
-ax6.legend()
+ax6.plot(voltage_merged, Theta_merged, 'c-', linewidth=1.0)
+ax6.set_xlabel('DC Ramp (V)', fontsize=11, fontweight='bold')
+ax6.set_ylabel('Theta (°)', fontsize=11, fontweight='bold')
+ax6.set_title('Phase vs DC Voltage', fontsize=12, fontweight='bold')
 ax6.grid(True, alpha=0.3)
 
-# Bottom row: R vs DC Ramp, Theta vs DC Ramp, Response Map
-# R vs DC Ramp
+# ── Row 2: up/down overlaid, R coloured by phase, X and Y ──
 ax7 = plt.subplot2grid((3, 3), (2, 0))
-ax7.plot(merged_df['DC_Voltage'], merged_df['R'] * 1e6, 'b-', linewidth=1.0, alpha=0.8)
-ax7.set_xlabel('DC Ramp (V)', fontsize=12, fontweight='bold')
-ax7.set_ylabel('AC Magnitude R (μA)', fontsize=12, fontweight='bold', color='b')
-ax7.tick_params(axis='y', labelcolor='b')
-ax7.set_title('AC Magnitude vs DC Potential', fontsize=13, fontweight='bold')
+colors_dir = {'up': 'steelblue', 'down': 'tomato'}
+for direction, res in merged.items():
+    v   = res['voltage']
+    X   = res['X']
+    Y   = res['Y']
+    valid = ~np.isnan(X) & ~np.isnan(Y)
+    R_d = np.sqrt(X[valid]**2 + Y[valid]**2)
+    ax7.plot(v[valid], R_d * 1e6,
+             color=colors_dir.get(direction, 'gray'),
+             linewidth=1.2, label=f'{direction} sweep')
+ax7.set_xlabel('DC Ramp (V)', fontsize=11, fontweight='bold')
+ax7.set_ylabel('R (μA)', fontsize=11, fontweight='bold')
+ax7.set_title('R — up vs down sweeps', fontsize=12, fontweight='bold')
+ax7.legend(fontsize=9)
 ax7.grid(True, alpha=0.3)
 
-# Theta vs DC Ramp
 ax8 = plt.subplot2grid((3, 3), (2, 1))
-ax8.plot(merged_df['DC_Voltage'], merged_df['Theta'], 'r-', linewidth=1.0, alpha=0.8)
-ax8.set_xlabel('DC Ramp (V)', fontsize=12, fontweight='bold')
-ax8.set_ylabel('Phase Angle (°)', fontsize=12, fontweight='bold', color='r')
-ax8.tick_params(axis='y', labelcolor='r')
-ax8.set_title('Phase Angle vs DC Potential', fontsize=13, fontweight='bold')
+sc = ax8.scatter(voltage_merged, R_merged * 1e6,
+                 c=Theta_merged, s=3, alpha=0.7,
+                 cmap='viridis', marker='.')
+ax8.set_xlabel('DC Potential (V)', fontsize=11, fontweight='bold')
+ax8.set_ylabel('R (μA)', fontsize=11, fontweight='bold')
+ax8.set_title('AC Response Map (colour = phase)', fontsize=12, fontweight='bold')
 ax8.grid(True, alpha=0.3)
+cbar = plt.colorbar(sc, ax=ax8)
+cbar.set_label('Phase (°)', fontsize=10)
 
-# Combined Response Map (DC vs R colored by Phase)
 ax9 = plt.subplot2grid((3, 3), (2, 2))
-scatter = ax9.scatter(merged_df['DC_Voltage'], merged_df['R'] * 1e6,
-                      c=merged_df['Theta'], s=2, alpha=0.6,
-                      cmap='viridis', marker='.')
-ax9.set_xlabel('DC Potential (V)', fontsize=12, fontweight='bold')
-ax9.set_ylabel('AC Magnitude R (μA)', fontsize=12, fontweight='bold')
-ax9.set_title('AC Response Map (colored by phase)', fontsize=13, fontweight='bold')
+ax9.plot(voltage_merged, X_merged, 'b-', linewidth=0.8, label='X', alpha=0.8)
+ax9.plot(voltage_merged, Y_merged, 'r-', linewidth=0.8, label='Y', alpha=0.8)
+ax9.set_xlabel('DC Ramp (V)', fontsize=11, fontweight='bold')
+ax9.set_ylabel('Signal (V)', fontsize=11, fontweight='bold')
+ax9.set_title('X and Y vs DC Voltage', fontsize=12, fontweight='bold')
+ax9.legend(fontsize=10)
 ax9.grid(True, alpha=0.3)
-cbar = plt.colorbar(scatter, ax=ax9)
-cbar.set_label('Phase (°)', fontsize=10, fontweight='bold')
 
-# Overall title
-fig.suptitle(f'AC Cyclic Voltammetry - DC Ramp Synchronized Dual Red Pitaya\n'
-             f'{n_merged} merged samples',
-             fontsize=16, fontweight='bold')
-plt.tight_layout(rect=[0, 0, 1, 0.96])
+fig.suptitle(
+    f'AC Cyclic Voltammetry — Triangle-Wave Ramp Synchronized\n'
+    f'{n_merged} merged voltage bins  |  '
+    f'{sum(len(v["indices"]) for v in x_segs)} X samples  |  '
+    f'{sum(len(v["indices"]) for v in y_segs)} Y samples',
+    fontsize=15, fontweight='bold'
+)
+plt.tight_layout(rect=[0, 0, 1, 0.95])
 
-# Save combined plot
 combined_png = os.path.join(OUTPUT_DIRECTORY, f'ramp_sync_accv_{timestamp_str}.png')
 plt.savefig(combined_png, dpi=150, bbox_inches='tight')
-print(f"✓ Saved ACCV-style plot: {combined_png}")
+print(f"✓ Saved ACCV plot: {combined_png}")
 
-# Print statistics
 print("\n" + "=" * 60)
 print("AC CYCLIC VOLTAMMETRY STATISTICS")
 print("=" * 60)
-print(f"AC Magnitude (R):  {np.mean(merged_df['R']) * 1e6:.3f} ± {np.std(merged_df['R']) * 1e6:.3f} μA")
-print(f"Phase Angle:       {np.mean(merged_df['Theta']):.3f} ± {np.std(merged_df['Theta']):.3f}°")
-print(f"X Component:       {np.mean(merged_df['X']):.6f} ± {np.std(merged_df['X']):.6f} V")
-print(f"Y Component:       {np.mean(merged_df['Y']):.6f} ± {np.std(merged_df['Y']):.6f} V")
-print(f"DC Potential:      {np.mean(merged_df['DC_Voltage']):.6f} ± {np.std(merged_df['DC_Voltage']):.6f} V")
-print(f"\nCorrelations:")
-print(f"  R vs DC:         {np.corrcoef(merged_df['R'], merged_df['DC_Voltage'])[0, 1]:.4f}")
-print(f"  Phase vs DC:     {np.corrcoef(merged_df['Theta'], merged_df['DC_Voltage'])[0, 1]:.4f}")
-print(f"  X vs DC:         {np.corrcoef(merged_df['X'], merged_df['DC_Voltage'])[0, 1]:.4f}")
-print(f"  Y vs DC:         {np.corrcoef(merged_df['Y'], merged_df['DC_Voltage'])[0, 1]:.4f}")
+print(f"R:      {np.nanmean(R_merged)*1e6:.3f} ± {np.nanstd(R_merged)*1e6:.3f} μA")
+print(f"Theta:  {np.nanmean(Theta_merged):.3f} ± {np.nanstd(Theta_merged):.3f}°")
+print(f"X:      {np.nanmean(X_merged):.6f} ± {np.nanstd(X_merged):.6f} V")
+print(f"Y:      {np.nanmean(Y_merged):.6f} ± {np.nanstd(Y_merged):.6f} V")
+print(f"DC span: {np.min(voltage_merged):.4f} → {np.max(voltage_merged):.4f} V")
 print("=" * 60)
 
 plt.show()
-
-print("\n✓ COMPLETE - DC Ramp Synchronized Acquisition")
+print("\n✓ COMPLETE")
 print("=" * 60)
