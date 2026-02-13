@@ -26,16 +26,20 @@ from pyrpl import Pyrpl
 REF_FREQUENCY = 500  # Hz
 REF_AMPLITUDE = 0.2  # V (not used, Y device doesn't generate reference)
 PHASE_OFFSET = 0  # degrees
-MEASUREMENT_TIME = 12.0  # seconds
+MEASUREMENT_TIME = 30.0  # seconds
 
-# INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
+# INPUT MODE for IN1: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'MANUAL'
 MANUAL_GAIN_FACTOR = 1.0  # Y component gain correction
-MANUAL_DC_OFFSET = 0.0  # Y component DC offset
+MANUAL_DC_OFFSET = 0.0    # Y component DC offset
+
+# IN2 (DC RAMP) GAIN - independent from IN1 gain
+IN2_GAIN_FACTOR = -1.0   # Scale factor for DC ramp on IN2 (e.g. voltage divider ratio)
+IN2_DC_OFFSET = 0.0     # DC offset correction for IN2 (V)
 
 FILTER_BANDWIDTH = 10  # Hz
-AVERAGING_WINDOW = 10  # samples (moving average on logged data)
-DECIMATION = 1024
+AVERAGING_WINDOW = 1  # samples (moving average on logged data)
+DECIMATION = 8
 
 SAVE_DATA = True
 OUTPUT_DIRECTORY = 'test_data'
@@ -65,7 +69,8 @@ class RedPitayaLockInYLogger:
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
     def __init__(self, output_dir='test_data', input_mode='AUTO',
-                 manual_gain=1.0, manual_offset=0.0):
+                 manual_gain=1.0, manual_offset=0.0,
+                 in2_gain=1.0, in2_offset=0.0):
 
         self.rp = Pyrpl(config='dc_config5', hostname='rp-f0909c.local')
         self.rp_modules = self.rp.rp
@@ -78,7 +83,7 @@ class RedPitayaLockInYLogger:
         self.dc_ramp = []
         self.capture_times = []
 
-        # Setup input gain scaling and DC offset
+        # ── IN1 gain / offset ──────────────────────────────────────────────
         self.input_gain_factor = manual_gain
         self.input_dc_offset = manual_offset
         self.input_mode_setting = input_mode.upper()
@@ -88,24 +93,29 @@ class RedPitayaLockInYLogger:
             self.input_gain_factor = manual_gain
             self.input_dc_offset = manual_offset
             self.input_mode = f"MANUAL ({manual_gain}x gain, {manual_offset}V offset)"
-            print(f"Input mode: {self.input_mode}")
+            print(f"IN1 input mode: {self.input_mode}")
         elif self.input_mode_setting == 'LV':
             self.input_gain_factor = 1.0
             self.input_dc_offset = 0.0
             self.input_mode = "LV (±1V)"
-            print(f"Input mode: {self.input_mode}")
+            print(f"IN1 input mode: {self.input_mode}")
         elif self.input_mode_setting == 'HV':
             self.input_gain_factor = 20.0
             self.input_dc_offset = 0.0
             self.input_mode = "HV (±20V, 20:1 divider)"
-            print(f"Input mode: {self.input_mode}")
+            print(f"IN1 input mode: {self.input_mode}")
         elif self.input_mode_setting == 'AUTO':
             self.input_mode = "AUTO (will calibrate)"
-            print("Input mode: AUTO - will auto-detect")
+            print("IN1 input mode: AUTO - will auto-detect")
+
+        # ── IN2 gain / offset (DC ramp) ────────────────────────────────────
+        self.in2_gain_factor = in2_gain
+        self.in2_dc_offset = in2_offset
+        print(f"IN2 (DC ramp) gain: {self.in2_gain_factor}x, offset: {self.in2_dc_offset}V")
 
         # Scope setup - read Y component and DC ramp
         self.scope.input1 = 'iq2_2'  # Y component from lock-in
-        self.scope.input2 = 'in2'  # DC ramp reference
+        self.scope.input2 = 'in2'    # DC ramp reference
         self.scope.decimation = DECIMATION
 
         if self.scope.decimation not in self.allowed_decimations:
@@ -120,25 +130,24 @@ class RedPitayaLockInYLogger:
 
     def calibrate_input_gain(self, cal_freq=100, cal_amp=1.0, cal_time=2.0, force=False):
         """
-        Measure actual input scaling and DC offset by comparing OUT1 to IN1 directly.
-        This measures the physical signal on IN1.
+        Measure actual IN1 scaling and DC offset by comparing OUT1 to IN1 directly.
+        Note: IN2 gain/offset are set manually via IN2_GAIN_FACTOR / IN2_DC_OFFSET.
         """
         if not force and self.input_mode_setting != 'AUTO':
-            print(f"Skipping calibration - using {self.input_mode}")
+            print(f"Skipping IN1 calibration - using {self.input_mode}")
             return self.input_gain_factor
 
         print("\n" + "=" * 60)
-        print("CALIBRATING INPUT SCALING AND DC OFFSET...")
+        print("CALIBRATING IN1 SCALING AND DC OFFSET...")
         print("=" * 60)
 
         # Step 1: Measure DC offset with no signal
         print("Step 1: Measuring DC offset on IN1 (no signal)...")
         self.asg.output_direct = 'off'
 
-        # Configure scope to read raw IN1
         self.scope.input1 = 'in1'
         self.scope.input2 = 'in1'
-        time.sleep(0.3)  # Let signal settle
+        time.sleep(0.3)
 
         offset_samples = []
         for _ in range(10):
@@ -151,11 +160,9 @@ class RedPitayaLockInYLogger:
         # Step 2: Measure gain with calibration signal
         print(f"\nStep 2: Measuring gain with {cal_amp}V @ {cal_freq} Hz...")
 
-        # Configure scope to read OUT1 and IN1
         self.scope.input1 = 'out1'
         self.scope.input2 = 'in1'
 
-        # Generate calibration signal using ASG
         self.asg.setup(
             frequency=cal_freq,
             amplitude=cal_amp,
@@ -165,7 +172,7 @@ class RedPitayaLockInYLogger:
         )
         self.asg.output_direct = 'out1'
 
-        time.sleep(0.5)  # Let signal settle
+        time.sleep(0.5)
 
         cal_out1 = []
         cal_in1 = []
@@ -178,26 +185,19 @@ class RedPitayaLockInYLogger:
             cal_out1.append(ch1)
             cal_in1.append(ch2)
 
-        # Concatenate all samples
         all_out1 = np.concatenate(cal_out1)
         all_in1 = np.concatenate(cal_in1)
-
-        # Remove DC offset from IN1
         all_in1_corrected = all_in1 - self.input_dc_offset
 
-        # Calculate peak-to-peak amplitudes
         out1_peak = (np.max(all_out1) - np.min(all_out1)) / 2
         in1_peak = (np.max(all_in1_corrected) - np.min(all_in1_corrected)) / 2
 
-        # Also calculate RMS for comparison
         out1_rms = np.sqrt(np.mean(all_out1 ** 2))
         in1_rms = np.sqrt(np.mean(all_in1_corrected ** 2))
 
-        # Gain factor = what we sent / what we measured
         self.input_gain_factor = out1_peak / in1_peak
         gain_rms = out1_rms / in1_rms
 
-        # Classify the mode based on gain
         if self.input_gain_factor < 1.05:
             self.input_mode = "LV (±1V)"
         elif self.input_gain_factor < 2.0:
@@ -215,7 +215,6 @@ class RedPitayaLockInYLogger:
         print(f"  Detected mode: {self.input_mode}")
         print("=" * 60 + "\n")
 
-        # Turn off calibration signal
         self.asg.output_direct = 'off'
 
         # Restore scope to Y component and DC ramp
@@ -226,20 +225,19 @@ class RedPitayaLockInYLogger:
 
     def setup_lockin(self, params):
         """Configure the lock-in (but don't generate reference signal)"""
-        self.ref_freq = params['ref_freq']  # Store ref_freq for plotting
+        self.ref_freq = params['ref_freq']
         filter_bw = params.get('filter_bandwidth', 10)
         phase_setting = params.get('phase', 0)
 
-        # Setup lock-in to listen for reference from other Red Pitaya
         self.lockin.setup(
             frequency=self.ref_freq,
             bandwidth=filter_bw,
             gain=0.0,
             phase=phase_setting,
             acbandwidth=0,
-            amplitude=0.0,  # Don't generate output
+            amplitude=0.0,
             input='in1',
-            output_direct='off',  # No output
+            output_direct='off',
             output_signal='quadrature',
             quadrature_factor=1.0)
 
@@ -248,8 +246,10 @@ class RedPitayaLockInYLogger:
         print(f"\nY Lock-in Configuration:")
         print(f"  Frequency: {self.ref_freq} Hz (actual: {actual_freq:.2f} Hz)")
         print(f"  Bandwidth: {filter_bw} Hz")
-        print(f"  Gain correction: {self.input_gain_factor:.4f}x")
-        print(f"  DC offset correction: {self.input_dc_offset:.6f}V")
+        print(f"  IN1 gain correction: {self.input_gain_factor:.4f}x")
+        print(f"  IN1 DC offset correction: {self.input_dc_offset:.6f}V")
+        print(f"  IN2 gain correction: {self.in2_gain_factor:.4f}x")
+        print(f"  IN2 DC offset correction: {self.in2_dc_offset:.6f}V")
         print(f"  (Listening for reference from other Red Pitaya)")
 
     def capture_buffer(self):
@@ -272,15 +272,13 @@ class RedPitayaLockInYLogger:
         self.capture_times.append(capture_time)
 
     def run(self, params):
-        # Auto-calibrate if requested
         if params.get('auto_calibrate', False):
             self.calibrate_input_gain(
-                cal_freq=100,  # Use 100 Hz for calibration
+                cal_freq=100,
                 cal_amp=1.0,
                 cal_time=params.get('calibration_time', 2.0)
             )
 
-        # Setup lock-in
         self.setup_lockin(params)
 
         print("\nAllowing lock-in to settle...")
@@ -291,14 +289,13 @@ class RedPitayaLockInYLogger:
 
         acq_mode = params.get('acquisition_mode', 'SINGLE_SHOT')
 
-        # Collect data!
         if acq_mode == 'CONTINUOUS':
             self.scope.continuous()
-            time.sleep(0.1)  # let it start
+            time.sleep(0.1)
             loop_start = time.time()
             while (time.time() - loop_start) < params['timeout']:
                 self.capture_buffer_continuous()
-                time.sleep(0.001)  # small delay to avoid overwhelming the system
+                time.sleep(0.001)
         else:  # SINGLE_SHOT (default)
             loop_start = time.time()
             while (time.time() - loop_start) < params['timeout']:
@@ -309,26 +306,24 @@ class RedPitayaLockInYLogger:
         capture_count = len(self.lockin_Y)
         print(f"✓ Captured {capture_count} buffers")
 
-        # Concatenate all buffers
+        # Combine all the data
         all_Y_raw = np.concatenate(self.lockin_Y)
         all_ramp_raw = np.concatenate(self.dc_ramp)
 
-        # Apply gain correction to Y
-        all_Y = all_Y_raw * self.input_gain_factor
+        # Apply gain + offset corrections independently
+        all_Y = all_Y_raw * self.input_gain_factor                               # IN1 correction
+        all_ramp = (all_ramp_raw - self.in2_dc_offset) * self.in2_gain_factor    # IN2 correction
 
         # Apply averaging if requested
         w = params.get('averaging_window', 1)
         if w > 1:
             all_Y = np.convolve(all_Y, np.ones(w) / w, mode='valid')
-            all_ramp_raw = np.convolve(all_ramp_raw, np.ones(w) / w, mode='valid')
+            all_ramp = np.convolve(all_ramp, np.ones(w) / w, mode='valid')
             print(f"Applied {w}-sample moving average")
 
         n_samples = len(all_Y)
-
-        # Use sample-based indexing (matches lock-in, better for sync)
         sample_index = np.arange(n_samples)
         t = sample_index / (n_samples / actual_duration)
-
         effective_sample_rate = n_samples / actual_duration
 
         # Buffer timing diagnostics
@@ -337,26 +332,27 @@ class RedPitayaLockInYLogger:
         buffer_spacing = actual_duration / capture_count
         dead_time = buffer_spacing - data_time_per_buffer
 
-        # Print summary
         print("\n" + "=" * 60)
         print("LOCK-IN Y COMPONENT + DC RAMP RESULTS")
         print("=" * 60)
-        print(f"Mode: {self.input_mode}")
-        print(f"Gain correction: {self.input_gain_factor:.4f}x")
-        print(f"DC offset correction: {self.input_dc_offset:.6f}V")
+        print(f"IN1 mode: {self.input_mode}")
+        print(f"IN1 gain correction: {self.input_gain_factor:.4f}x")
+        print(f"IN1 DC offset correction: {self.input_dc_offset:.6f}V")
+        print(f"IN2 gain correction: {self.in2_gain_factor:.4f}x")
+        print(f"IN2 DC offset correction: {self.in2_dc_offset:.6f}V")
         print(f"Duration: {actual_duration:.3f}s")
         print(f"Samples: {n_samples}")
         print(f"Effective sample rate: {effective_sample_rate:.2f} Hz")
         print(f"Mean Y: {np.mean(all_Y):.6f} V")
         print(f"Std dev: {np.std(all_Y):.6f} V")
-        print(f"DC Ramp range: {np.min(all_ramp_raw):.6f} to {np.max(all_ramp_raw):.6f} V")
+        print(f"DC Ramp range: {np.min(all_ramp):.6f} to {np.max(all_ramp):.6f} V")
         print("\nBuffer statistics:")
         print(f"  Buffers: {capture_count}")
         print(f"  Samples per buffer: {samples_per_buffer:.0f}")
         print(f"  Data time per buffer: {data_time_per_buffer:.3f}s")
         print(f"  Gap per buffer: {dead_time * 1000:.1f} ms")
-        print(
-            f"  Dead time: {dead_time * capture_count:.2f}s ({dead_time * capture_count / actual_duration * 100:.1f}%)")
+        print(f"  Dead time: {dead_time * capture_count:.2f}s "
+              f"({dead_time * capture_count / actual_duration * 100:.1f}%)")
         print("=" * 60)
 
         # Grab raw signals for plots
@@ -372,10 +368,7 @@ class RedPitayaLockInYLogger:
         self.scope.input1 = 'iq2_2'
         self.scope.input2 = 'in2'
 
-        # Calculate magnitude (just Y for this logger, no X available)
-        R_y = np.abs(all_Y)
-
-        # Make plots - 3x3 layout matching original
+        # Make plots - 3x3 layout
         fig = plt.figure(figsize=(16, 10))
 
         t_raw_corrected = np.linspace(0, len(out1_raw) / self.nominal_sample_rate, len(out1_raw))
@@ -398,12 +391,12 @@ class RedPitayaLockInYLogger:
         ax2.set_title(f'Input - {self.input_mode}')
         ax2.grid(True)
 
-        # DC Ramp vs Time
+        # DC Ramp vs Time (corrected)
         ax3 = plt.subplot(3, 3, 3)
-        ax3.plot(t, all_ramp_raw, 'g-', linewidth=0.5)
+        ax3.plot(t, all_ramp, 'g-', linewidth=0.5)
         ax3.set_xlabel('Time (s)')
-        ax3.set_ylabel('DC Ramp (V)')
-        ax3.set_title('DC Ramp (IN2) vs Time')
+        ax3.set_ylabel('DC Ramp (V, corrected)')
+        ax3.set_title(f'DC Ramp (IN2) vs Time\n(gain={self.in2_gain_factor}x, offset={self.in2_dc_offset}V)')
         ax3.grid(True)
 
         # Y vs Time
@@ -419,15 +412,13 @@ class RedPitayaLockInYLogger:
         margin_Y = 5 * (np.max(all_Y) - np.min(all_Y)) if np.max(all_Y) != np.min(all_Y) else 0.001
         ax4.set_ylim(np.min(all_Y) - margin_Y, np.max(all_Y) + margin_Y)
 
-        # Y vs DC Ramp
+        # Y vs DC Ramp (both corrected)
         ax5 = plt.subplot(3, 3, 5)
-        ax5.plot(all_ramp_raw, all_Y, 'm-', linewidth=0.5)
-        ax5.set_xlabel('DC Ramp (V)')
+        ax5.plot(all_ramp, all_Y, 'm-', linewidth=0.5)
+        ax5.set_xlabel('DC Ramp (V, corrected)')
         ax5.set_ylabel('Y (V)')
         ax5.set_title('Y vs DC Ramp')
         ax5.grid(True)
-
-
 
         plt.tight_layout()
 
@@ -444,14 +435,17 @@ class RedPitayaLockInYLogger:
             csv_path = os.path.join(self.output_dir, f"lockin_y_ramp_{ts}.csv")
             with open(csv_path, 'w') as f:
                 f.write("# Red Pitaya Lock-In Y Component + DC Ramp Logger\n")
-                f.write(f"# Mode: {self.input_mode}\n")
-                f.write(f"# Gain: {self.input_gain_factor:.6f}\n")
-                f.write(f"# Offset: {self.input_dc_offset:.6f}\n")
+                f.write(f"# IN1 mode: {self.input_mode}\n")
+                f.write(f"# IN1 gain: {self.input_gain_factor:.6f}\n")
+                f.write(f"# IN1 offset: {self.input_dc_offset:.6f} V\n")
+                f.write(f"# IN2 gain: {self.in2_gain_factor:.6f}\n")
+                f.write(f"# IN2 offset: {self.in2_dc_offset:.6f} V\n")
                 f.write(f"# Duration: {actual_duration:.6f}\n")
                 f.write(f"# Sample rate: {effective_sample_rate:.3f} Hz\n")
                 f.write(f"# Samples: {n_samples}\n")
                 f.write("Index,Time(s),Y(V),DCRamp(V)\n")
-                np.savetxt(f, np.column_stack((sample_index, t, all_Y, all_ramp_raw)), delimiter=",", fmt="%.10f")
+                np.savetxt(f, np.column_stack((sample_index, t, all_Y, all_ramp)),
+                           delimiter=",", fmt="%.10f")
             print(f"✓ Saved data: {csv_path}")
 
 
@@ -460,7 +454,9 @@ if __name__ == "__main__":
         output_dir=OUTPUT_DIRECTORY,
         input_mode=INPUT_MODE,
         manual_gain=MANUAL_GAIN_FACTOR,
-        manual_offset=MANUAL_DC_OFFSET
+        manual_offset=MANUAL_DC_OFFSET,
+        in2_gain=IN2_GAIN_FACTOR,      # <-- IN2 gain passed here
+        in2_offset=IN2_DC_OFFSET,      # <-- IN2 offset passed here
     )
 
     run_params = {
@@ -481,10 +477,12 @@ if __name__ == "__main__":
     print(f"Reference frequency: {REF_FREQUENCY} Hz (listening)")
     print(f"Filter bandwidth: {FILTER_BANDWIDTH} Hz")
     print(f"Measurement time: {MEASUREMENT_TIME}s")
-    print(f"Input mode: {INPUT_MODE}")
+    print(f"IN1 mode: {INPUT_MODE}")
     if INPUT_MODE.upper() == 'MANUAL':
-        print(f"Manual gain: {MANUAL_GAIN_FACTOR}x")
-        print(f"Manual DC offset: {MANUAL_DC_OFFSET}V")
+        print(f"IN1 manual gain: {MANUAL_GAIN_FACTOR}x")
+        print(f"IN1 manual DC offset: {MANUAL_DC_OFFSET}V")
+    print(f"IN2 gain: {IN2_GAIN_FACTOR}x")
+    print(f"IN2 DC offset: {IN2_DC_OFFSET}V")
     print("=" * 60)
 
     rp.run(run_params)
