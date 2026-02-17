@@ -33,7 +33,7 @@ AUTOLAB_GAIN = 1  # Based on Autolab "Current Scale" if Scale = 1mA : Set to 1e-
 MANUAL_GAIN_FACTOR = 1 * AUTOLAB_GAIN  # Only used if INPUT_MODE = 'MANUAL'
 MANUAL_DC_OFFSET = 0   # Only used if INPUT_MODE = 'MANUAL'
 
-FILTER_BANDWIDTH = 100  # Hz
+FILTER_BANDWIDTH = 10  # Hz
 AVERAGING_WINDOW = 1  # samples (moving average on logged data)
 DECIMATION = 8
 
