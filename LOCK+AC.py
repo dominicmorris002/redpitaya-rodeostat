@@ -6,19 +6,7 @@ For testing: connect OUT1 to IN1 with a cable.
 Supports AUTO, LV, HV, or MANUAL gain modes.
 Phase is in degrees!
 
-Includes post-processing signal sharpening to recover sharp peaks that
-the low-pass filter rounds off (useful for AC-CV measurements).
-
-IMPORTANT FOR SHARP PEAKS:
-  FILTER_BANDWIDTH controls the lock-in LPF time constant.
-  At 10 Hz BW  -> time constant = 16 ms  -> peaks get heavily rounded.
-  At 100 Hz BW -> time constant = 1.6 ms -> much sharper peaks.
-  Raise FILTER_BANDWIDTH if your peaks look like sine waves instead of triangles.
-
-  Also: if your CV sweep is ~1.5 Hz and DECIMATION = 8, each scope buffer covers
-  only ~1 ms of real time, so thousands of buffers get stitched together per cycle.
-  If peaks look sinusoidal despite a triangle sweep, raise DECIMATION to 65536 so
-  each buffer covers several full CV cycles and stitching artefacts disappear.
+I recommend CONTINUOUS Mode for good Data.
 
 Have a great day :)
 """
@@ -43,30 +31,19 @@ MEASUREMENT_TIME = 12 # seconds
 
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'MANUAL'
-AUTOLAB_GAIN = 1  # e.g. 1mA scale -> 1e-3
+AUTOLAB_GAIN = 1  # e.g. Based on AUTOLAB Device Scale of TIA, 1mA scale -> 1e-3
 MANUAL_GAIN_FACTOR = 1 * AUTOLAB_GAIN
 MANUAL_DC_OFFSET = 0
 
 # ── FILTER BANDWIDTH ──────────────────────────────────────────────────────────
-# This is the most important parameter for peak shape!
-#   10 Hz  -> tau = 16 ms  -> peaks are very rounded / sine-wave-like
-#   100 Hz -> tau = 1.6 ms -> peaks are much sharper / more triangular
-#   500 Hz -> tau = 0.3 ms -> very sharp but noisier
-# Start at 100 Hz and adjust. If peaks still look rounded, go higher.
-# If too noisy, go lower.
-FILTER_BANDWIDTH = 100  # Hz
+#   10 Hz  -> tau = 16 ms This is Best
+#   100 Hz -> tau = 1.6 ms
+#   500 Hz -> tau = 0.3 ms
+FILTER_BANDWIDTH = 10  # Hz
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── DECIMATION ────────────────────────────────────────────────────────────────
 # Controls scope sample rate: sample_rate = 125e6 / DECIMATION
-# Must be one of: 1, 8, 64, 1024, 8192, 65536
-#
-#   DECIMATION = 8     -> 15.6 MHz, buffer covers ~1 ms   (lots of tiny fragments)
-#   DECIMATION = 8192  -> 15 kHz,   buffer covers ~1.07 s (good for ~1 Hz sweeps)
-#   DECIMATION = 65536 -> 1.9 kHz,  buffer covers ~8.6 s  (covers many full cycles)
-#
-# For a ~1.5 Hz CV sweep: use DECIMATION = 8192 or 65536 to avoid buffer
-# stitching artefacts that make triangle waves look like sine waves.
 DECIMATION = 8
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -84,9 +61,7 @@ ACQUISITION_MODE = 'CONTINUOUS'
 # ============================================================
 # PLOT DOWNSAMPLING
 # ============================================================
-# CONTINUOUS mode collects millions of points. Matplotlib freezes on all of them.
-# Downsampling ALWAYS happens before plotting to keep the UI responsive.
-# It is NOT conditional on sharpening — it runs regardless.
+
 # CSV always saves full resolution data no matter what.
 PLOT_DOWNSAMPLE_ENABLED = True
 PLOT_MAX_POINTS = 50_000
@@ -94,18 +69,14 @@ PLOT_MAX_POINTS = 50_000
 # ============================================================
 # SIGNAL SHARPENING
 # ============================================================
-# Sharpening runs on the already-downsampled data (fast).
-# Row 5 of the plots shows the SHARPENED signal with the raw overlaid
-# as a faint dashed line so you can compare directly.
-#
+
 # Methods available:
 #   'unsharp' - Unsharp masking. Subtracts a blurred copy to boost edges.
-#               Best general-purpose starting point.
 #   'savgol'  - Savitzky-Golay 2nd-derivative boost. Better for noisy signals.
 #
-# Strength: 0.0 = no effect, 1.0 = very aggressive. Start at 0.5.
-# If peaks are still rounded, increase strength. If noise spikes appear, decrease.
-SHARPENING_ENABLED = True
+# Strength: 0.0 = no effect, 1.0 = very aggressive.
+
+SHARPENING_ENABLED = False
 SHARPENING_METHOD = 'unsharp'   # 'unsharp' or 'savgol'
 SHARPENING_STRENGTH = 0.5
 SHARPENING_SIGMA = None         # None = auto (capped at 500 samples)
@@ -122,15 +93,11 @@ except FileNotFoundError:
 
 
 # ============================================================
-# HELPERS
+# Data Helpers
 # ============================================================
 
 def downsample(arrays, n_samples, max_points, enabled=True):
-    """
-    Uniformly downsample a list of arrays for plotting.
-    Always runs regardless of sharpening setting.
-    Returns (downsampled_arrays, step_used, n_output_points).
-    """
+
     if not enabled or n_samples <= max_points:
         return arrays, 1, n_samples
     step = max(1, n_samples // max_points)
@@ -140,22 +107,7 @@ def downsample(arrays, n_samples, max_points, enabled=True):
 
 def sharpen_signal(signal, t, filter_bandwidth, method='unsharp',
                    strength=0.5, smooth_sigma=None):
-    """
-    Sharpen a signal rounded by the lock-in low-pass filter.
 
-    Always call this on already-downsampled data to keep it fast.
-    Sigma is auto-computed from the downsampled sample rate and capped
-    at 500 samples to prevent gaussian_filter1d from freezing.
-
-    Parameters
-    ----------
-    signal : ndarray
-    t : ndarray           Time axis in seconds (downsampled)
-    filter_bandwidth : float   LPF bandwidth in Hz
-    method : str          'unsharp' or 'savgol'
-    strength : float      0 = off, 1 = maximum
-    smooth_sigma : float or None   Manual sigma override (unsharp only)
-    """
     if strength == 0 or len(signal) < 5:
         return signal.copy()
 
@@ -466,9 +418,8 @@ class RedPitayaLockInLogger:
         filter_bw = params.get('filter_bandwidth', 10)
         tc_ms = 1e3 / (2 * np.pi * filter_bw)
 
-        # ── Downsample first (always, regardless of sharpening) ───────────────
-        # This keeps matplotlib fast AND makes sharpening fast.
-        # The full-resolution data is always saved to CSV.
+        # ── Downsample first  ───────────────
+
         ds_on  = params.get('plot_downsample_enabled', True)
         ds_max = params.get('plot_max_points', 50_000)
 
@@ -600,6 +551,8 @@ class RedPitayaLockInLogger:
         #   Row 3: R (full)        | Theta (full)  | Phase vs Magnitude
         #   Row 4: R zoomed RAW    | Theta zoomed RAW    | IQ zoomed RAW
         #   Row 5: R zoomed SHARP  | Theta zoomed SHARP  | IQ zoomed SHARP
+
+
         print("\nRendering plots...")
         fig = plt.figure(figsize=(18, 22))
 
