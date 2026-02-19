@@ -9,6 +9,8 @@ Phase is in degrees!
 I recommend CONTINUOUS Mode for good Data.
 
 Have a great day :)
+
+Dominic Morris 2/19/2026
 """
 
 from datetime import datetime
