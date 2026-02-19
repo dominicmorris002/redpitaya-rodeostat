@@ -7,6 +7,8 @@ Connect your DC signal to IN1.
 To do AC CV use the startboth file
 
 Have a Great Day ;)
+
+Dominic Morris
 """
 
 from datetime import datetime
