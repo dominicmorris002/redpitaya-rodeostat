@@ -230,6 +230,11 @@ class RedPitayaDCLogger:
                 cal_time=params.get('calibration_time', 2.0)
             )
 
+        # ── Wait for Enter before starting measurement ────────────────────────
+        input("\nPress Enter to start measurement...")
+        print("")
+        # ─────────────────────────────────────────────────────────────────────
+
         print("\nAllowing scope to settle...")
         time.sleep(0.3)
 
