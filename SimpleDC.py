@@ -1,5 +1,5 @@
 """
-Red Pitaya DC Voltage Data Logger 
+Red Pitaya DC Voltage Data Logger
 Architecture matches Lock-In logger exactly.
 Single plot: Voltage vs Time
 Connect your DC signal to IN1.
@@ -7,8 +7,6 @@ Connect your DC signal to IN1.
 To do AC CV use the startboth file
 
 Have a Great Day ;)
-
-
 """
 
 from datetime import datetime
@@ -35,6 +33,16 @@ CALIBRATION_TIME = 2.0  # seconds
 
 SAVE_DATA = True
 OUTPUT_DIRECTORY = 'test_data'
+
+# ACQUISITION MODE: 'SINGLE_SHOT' or 'CONTINUOUS'
+ACQUISITION_MODE = 'CONTINUOUS'
+
+# ============================================================
+# PLOT DOWNSAMPLING
+# ============================================================
+# CSV always saves full resolution data no matter what.
+PLOT_DOWNSAMPLE_ENABLED = True
+PLOT_MAX_POINTS = 50_000
 # ============================================================
 
 START_TIME_FILE = "start_time.txt"
@@ -47,6 +55,18 @@ try:
         time.sleep(0.001)
 except FileNotFoundError:
     pass  # No sync file, start immediately
+
+
+# ============================================================
+# Data Helpers
+# ============================================================
+
+def downsample(arrays, n_samples, max_points, enabled=True):
+    if not enabled or n_samples <= max_points:
+        return arrays, 1, n_samples
+    step = max(1, n_samples // max_points)
+    ds = [arr[::step] for arr in arrays]
+    return ds, step, len(ds[0])
 
 
 class RedPitayaDCLogger:
@@ -107,10 +127,6 @@ class RedPitayaDCLogger:
         print(f"Nominal sample rate: {self.nominal_sample_rate:.2f} Hz")
 
     def calibrate_input_gain(self, cal_freq=100, cal_amp=1.0, cal_time=2.0, force=False):
-        """
-        Measure actual input scaling and DC offset by comparing OUT1 to IN1 directly.
-        This measures the physical signal on IN1.
-        """
         if not force and self.input_mode_setting != 'AUTO':
             print(f"Skipping calibration - using {self.input_mode}")
             return self.input_gain_factor
@@ -119,14 +135,11 @@ class RedPitayaDCLogger:
         print("CALIBRATING INPUT SCALING AND DC OFFSET...")
         print("=" * 60)
 
-        # Step 1: Measure DC offset with no signal
         print("Step 1: Measuring DC offset on IN1 (no signal)...")
         self.asg.output_direct = 'off'
-
-        # Configure scope to read raw IN1
         self.scope.input1 = 'in1'
         self.scope.input2 = 'in1'
-        time.sleep(0.3)  # Let signal settle
+        time.sleep(0.3)
 
         offset_samples = []
         for _ in range(10):
@@ -136,14 +149,10 @@ class RedPitayaDCLogger:
         self.input_dc_offset = np.mean(offset_samples)
         print(f"  Measured DC offset: {self.input_dc_offset:.6f}V")
 
-        # Step 2: Measure gain with calibration signal
         print(f"\nStep 2: Measuring gain with {cal_amp}V @ {cal_freq} Hz...")
-
-        # Configure scope to read OUT1 and IN1
         self.scope.input1 = 'out1'
         self.scope.input2 = 'in1'
 
-        # Generate calibration signal using ASG
         self.asg.setup(
             frequency=cal_freq,
             amplitude=cal_amp,
@@ -152,8 +161,7 @@ class RedPitayaDCLogger:
             trigger_source='immediately'
         )
         self.asg.output_direct = 'out1'
-
-        time.sleep(0.5)  # Let signal settle
+        time.sleep(0.5)
 
         cal_out1 = []
         cal_in1 = []
@@ -161,31 +169,21 @@ class RedPitayaDCLogger:
 
         while (time.time() - start_time) < cal_time:
             self.scope.single()
-            ch1 = np.array(self.scope._data_ch1_current)  # OUT1
-            ch2 = np.array(self.scope._data_ch2_current)  # IN1 (raw)
-            cal_out1.append(ch1)
-            cal_in1.append(ch2)
+            cal_out1.append(np.array(self.scope._data_ch1_current))
+            cal_in1.append(np.array(self.scope._data_ch2_current))
 
-        # Concatenate all samples
         all_out1 = np.concatenate(cal_out1)
         all_in1 = np.concatenate(cal_in1)
-
-        # Remove DC offset from IN1
         all_in1_corrected = all_in1 - self.input_dc_offset
 
-        # Calculate peak-to-peak amplitudes
         out1_peak = (np.max(all_out1) - np.min(all_out1)) / 2
         in1_peak = (np.max(all_in1_corrected) - np.min(all_in1_corrected)) / 2
-
-        # Also calculate RMS for comparison
         out1_rms = np.sqrt(np.mean(all_out1 ** 2))
         in1_rms = np.sqrt(np.mean(all_in1_corrected ** 2))
 
-        # Gain factor = what we sent / what we measured
         self.input_gain_factor = out1_peak / in1_peak
         gain_rms = out1_rms / in1_rms
 
-        # Classify the mode based on gain
         if self.input_gain_factor < 1.05:
             self.input_mode = "LV (±1V)"
         elif self.input_gain_factor < 2.0:
@@ -203,28 +201,29 @@ class RedPitayaDCLogger:
         print(f"  Detected mode: {self.input_mode}")
         print("=" * 60 + "\n")
 
-        # Turn off calibration signal
         self.asg.output_direct = 'off'
-
-        # Restore scope to IN1 only
         self.scope.input1 = 'in1'
         self.scope.input2 = 'in1'
 
         return self.input_gain_factor
 
     def capture_buffer(self):
-        """Capture one scope buffer"""
-        capture_time = time.time()
+        """Single-shot: trigger a capture and wait for it"""
         self.scope.single()
         ch1 = np.array(self.scope._data_ch1_current)
         self.buffers.append(ch1)
-        self.capture_times.append(capture_time)
+        self.capture_times.append(time.time())
+
+    def capture_buffer_continuous(self):
+        """Continuous: just read whatever is currently in the buffer"""
+        ch1 = np.array(self.scope._data_ch1_current)
+        self.buffers.append(ch1)
+        self.capture_times.append(time.time())
 
     def run(self, params):
-        # Auto-calibrate if requested
         if params.get('auto_calibrate', False):
             self.calibrate_input_gain(
-                cal_freq=100,  # Use 100 Hz for calibration
+                cal_freq=100,
                 cal_amp=1.0,
                 cal_time=params.get('calibration_time', 2.0)
             )
@@ -235,33 +234,36 @@ class RedPitayaDCLogger:
         acquisition_start = time.time()
         print(f"Started: {datetime.fromtimestamp(acquisition_start).strftime('%Y-%m-%d %H:%M:%S.%f')}")
 
-        loop_start = time.time()
-        while (time.time() - loop_start) < params['timeout']:
-            self.capture_buffer()
+        acq_mode = params.get('acquisition_mode', 'SINGLE_SHOT')
 
-        acquisition_end = time.time()
-        actual_duration = acquisition_end - acquisition_start
+        if acq_mode == 'CONTINUOUS':
+            self.scope.continuous()
+            time.sleep(0.1)
+            loop_start = time.time()
+            while (time.time() - loop_start) < params['timeout']:
+                self.capture_buffer_continuous()
+                time.sleep(0.001)
+        else:
+            loop_start = time.time()
+            while (time.time() - loop_start) < params['timeout']:
+                self.capture_buffer()
+
+        actual_duration = time.time() - acquisition_start
         capture_count = len(self.buffers)
-        print(f"✓ Captured {capture_count} buffers")
+        print(f"Captured {capture_count} buffers")
 
-        # Concatenate all buffers
+        # Concatenate and correct
         raw = np.concatenate(self.buffers)
-
-        # Apply manual gain/offset
         corrected = (raw - self.input_dc_offset) * self.input_gain_factor
 
-        # Apply averaging if requested
         w = params.get('averaging_window', 1)
         if w > 1:
             corrected = np.convolve(corrected, np.ones(w) / w, mode='valid')
             print(f"Applied {w}-sample moving average")
 
         n_samples = len(corrected)
-
-        # Use sample-based indexing (matches lock-in, better for sync)
         sample_index = np.arange(n_samples)
         t = sample_index / (n_samples / actual_duration)
-
         effective_sample_rate = n_samples / actual_duration
 
         # Buffer timing diagnostics
@@ -270,63 +272,85 @@ class RedPitayaDCLogger:
         buffer_spacing = actual_duration / capture_count
         dead_time = buffer_spacing - data_time_per_buffer
 
-        # Print summary
         print("\n" + "=" * 60)
         print("DC MEASUREMENT RESULTS")
         print("=" * 60)
-        print(f"Mode: {self.input_mode}")
-        print(f"Gain correction: {self.input_gain_factor:.4f}x")
-        print(f"DC offset correction: {self.input_dc_offset:.6f}V")
-        print(f"Duration: {actual_duration:.3f}s")
-        print(f"Samples: {n_samples}")
-        print(f"Effective sample rate: {effective_sample_rate:.2f} Hz")
-        print(f"Mean voltage: {np.mean(corrected):.6f} V")
-        print(f"Std dev: {np.std(corrected):.6f} V")
-        print("\nBuffer statistics:")
+        print(f"Mode:          {self.input_mode}")
+        print(f"Acq. mode:     {acq_mode}")
+        print(f"Gain:          {self.input_gain_factor:.4f}x")
+        print(f"DC offset:     {self.input_dc_offset:.6f}V")
+        print(f"Duration:      {actual_duration:.3f}s")
+        print(f"Samples:       {n_samples:,}")
+        print(f"Sample rate:   {effective_sample_rate:.2f} Hz")
+        print(f"Mean voltage:  {np.mean(corrected):.6f} V")
+        print(f"Std dev:       {np.std(corrected):.6f} V")
+        print(f"\nBuffer stats:")
         print(f"  Buffers: {capture_count}")
-        print(f"  Samples per buffer: {samples_per_buffer:.0f}")
-        print(f"  Data time per buffer: {data_time_per_buffer:.3f}s")
-        print(f"  Gap per buffer: {dead_time * 1000:.1f} ms")
-        print(
-            f"  Dead time: {dead_time * capture_count:.2f}s ({dead_time * capture_count / actual_duration * 100:.1f}%)")
+        print(f"  Samples/buf: {samples_per_buffer:.0f}")
+        print(f"  Gap/buf: {dead_time * 1000:.1f} ms")
+        print(f"  Dead time: {dead_time * capture_count:.2f}s "
+              f"({dead_time * capture_count / actual_duration * 100:.1f}%)")
         print("=" * 60)
 
-        # Plot voltage vs time
+        # ── Downsample for plotting ───────────────────────────────────────────
+        ds_on  = params.get('plot_downsample_enabled', True)
+        ds_max = params.get('plot_max_points', 50_000)
+
+        ds_arrays, ds_step, n_plot = downsample(
+            [t, corrected], n_samples, ds_max, enabled=ds_on)
+        t_p, v_p = ds_arrays
+
+        if ds_step > 1:
+            print(f"\nDownsampled: {n_samples:,} -> {n_plot:,} pts "
+                  f"(step={ds_step}) for plotting. CSV = full res.")
+        else:
+            print(f"\nNo downsampling needed ({n_samples:,} pts)")
+
+        ds_note = f' [1:{ds_step} for plot]' if ds_step > 1 else ''
+
+        # ── Plot ─────────────────────────────────────────────────────────────
         plt.figure(figsize=(14, 6))
-        plt.plot(t, corrected, linewidth=0.8)
+        plt.plot(t_p, v_p, linewidth=0.8, label=f'Voltage{ds_note}')
         plt.axhline(np.mean(corrected), color='r', linestyle='--',
                     label=f"Mean {np.mean(corrected):.6f} V")
+        plt.fill_between(t_p,
+                         np.mean(corrected) - np.std(corrected),
+                         np.mean(corrected) + np.std(corrected),
+                         alpha=0.15, color='blue', label=f'+/-1σ ({np.std(corrected):.6f} V)')
         plt.xlabel("Time (s)")
         plt.ylabel("Voltage (V)")
-        plt.title(f"DC Voltage vs Time - {self.input_mode}")
+        plt.title(f"DC Voltage vs Time - {self.input_mode}\n"
+                  f"Acq: {acq_mode}  |  {n_samples:,} samples @ {effective_sample_rate:.1f} Hz")
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
 
-        # Save figure and CSV
+        # ── Save ─────────────────────────────────────────────────────────────
         if params['save_file']:
-            if not os.path.exists(self.output_dir):
-                os.makedirs(self.output_dir)
-
+            os.makedirs(self.output_dir, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
             png_path = os.path.join(self.output_dir, f"dc_voltage_{ts}.png")
             plt.savefig(png_path, dpi=150)
-            print(f"\n✓ Saved plot: {png_path}")
+            print(f"\nPlot: {png_path}")
 
             csv_path = os.path.join(self.output_dir, f"dc_voltage_{ts}.csv")
-            with open(csv_path, 'w') as f:
+            with open(csv_path, 'w', newline='', encoding='ascii') as f:
                 f.write("# Red Pitaya DC Logger\n")
                 f.write(f"# Mode: {self.input_mode}\n")
+                f.write(f"# Acquisition: {acq_mode}\n")
                 f.write(f"# Gain: {self.input_gain_factor:.6f}\n")
                 f.write(f"# Offset: {self.input_dc_offset:.6f}\n")
                 f.write(f"# Duration: {actual_duration:.6f}\n")
                 f.write(f"# Sample rate: {effective_sample_rate:.3f} Hz\n")
                 f.write(f"# Samples: {n_samples}\n")
+                f.write(f"# Plot downsample step: {ds_step}x  (CSV is full resolution)\n")
                 f.write("Index,Time(s),Voltage(V)\n")
-                np.savetxt(f, np.column_stack((sample_index, t, corrected)), delimiter=",", fmt="%.10f")
-            print(f"✓ Saved data: {csv_path}")
-
-
+                np.savetxt(f, np.column_stack((sample_index, t, corrected)),
+                           delimiter=",", fmt="%.10f")
+            print(f"Data: {csv_path}")
+        else:
+            plt.show()
 
 
 if __name__ == "__main__":
@@ -338,21 +362,26 @@ if __name__ == "__main__":
     )
 
     run_params = {
-        'timeout': MEASUREMENT_TIME,
-        'averaging_window': AVERAGING_WINDOW,
-        'save_file': SAVE_DATA,
-        'auto_calibrate': AUTO_CALIBRATE,
-        'calibration_time': CALIBRATION_TIME,
+        'timeout':                 MEASUREMENT_TIME,
+        'averaging_window':        AVERAGING_WINDOW,
+        'save_file':               SAVE_DATA,
+        'auto_calibrate':          AUTO_CALIBRATE,
+        'calibration_time':        CALIBRATION_TIME,
+        'acquisition_mode':        ACQUISITION_MODE,
+        'plot_downsample_enabled': PLOT_DOWNSAMPLE_ENABLED,
+        'plot_max_points':         PLOT_MAX_POINTS,
     }
 
     print("=" * 60)
     print("RED PITAYA DC VOLTAGE DATA LOGGER")
     print("=" * 60)
     print(f"Measurement time: {MEASUREMENT_TIME}s")
-    print(f"Input mode: {INPUT_MODE}")
+    print(f"Input mode:       {INPUT_MODE}")
     if INPUT_MODE.upper() == 'MANUAL':
-        print(f"Manual gain: {MANUAL_GAIN_FACTOR}x")
-        print(f"Manual DC offset: {MANUAL_DC_OFFSET}V")
+        print(f"  Gain:   {MANUAL_GAIN_FACTOR}x")
+        print(f"  Offset: {MANUAL_DC_OFFSET}V")
+    print(f"Acq. mode:        {ACQUISITION_MODE}")
+    print(f"Plot DS:          {'ON -- max ' + str(PLOT_MAX_POINTS) + ' pts' if PLOT_DOWNSAMPLE_ENABLED else 'OFF'}")
     print("=" * 60)
 
     rp.run(run_params)
