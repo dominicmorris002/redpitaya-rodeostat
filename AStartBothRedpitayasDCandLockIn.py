@@ -197,10 +197,19 @@ print(f"Sync quality: mean={np.mean(time_diff)*1000:.1f}ms  max={np.max(np.abs(t
 print("\nRendering combined plot...")
 t_plot = time.time()
 
-fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+fig = plt.figure(figsize=(18, 12))
 fig.suptitle(f'AC Cyclic Voltammetry -- Synchronized Dual Red Pitaya\n'
              f'{n_samples:,} samples  |  AC removed: Butterworth LP @ {AC_REMOVAL_CUTOFF} Hz',
              fontsize=14, fontweight='bold')
+
+# Layout: top row = 3 time series, bottom row = 2 vs-DC plots
+ax_r   = fig.add_subplot(2, 3, 1)
+ax_th  = fig.add_subplot(2, 3, 2)
+ax_dc  = fig.add_subplot(2, 3, 3)
+ax_rdc = fig.add_subplot(2, 3, 4)
+ax_tdc = fig.add_subplot(2, 3, 5)
+# centre the bottom row by hiding the 6th slot
+fig.add_subplot(2, 3, 6).set_visible(False)
 
 # Downsample for plotting only
 MAX_PLOT_PTS = 50_000
@@ -208,64 +217,42 @@ step = max(1, n_samples // MAX_PLOT_PTS)
 sl   = slice(None, None, step)
 
 dc_p = dc_clean[sl]; R_p = R[sl]; Th_p = Theta[sl]
-t_p  = t_RP1[sl];    X_p = X[sl]; Y_p  = Y[sl]
-
-# --- R vs DC ---
-ax = axes[0, 0]
-ax.scatter(dc_p, R_p, s=2, alpha=0.5, c='steelblue')
-ax.set_xlabel('DC Potential (V)', fontweight='bold')
-ax.set_ylabel('AC Magnitude R (V)', fontweight='bold')
-ax.set_title('AC Magnitude vs DC Potential')
-ax.grid(True, alpha=0.3)
-
-# --- Theta vs DC ---
-ax = axes[0, 1]
-ax.scatter(dc_p, Th_p, s=2, alpha=0.5, c='tomato')
-ax.set_xlabel('DC Potential (V)', fontweight='bold')
-ax.set_ylabel(f'Phase Angle ({theta_unit})', fontweight='bold')
-ax.set_title('Phase Angle vs DC Potential')
-ax.grid(True, alpha=0.3)
-
-# --- IQ scatter colored by DC ---
-ax = axes[0, 2]
-sc = ax.scatter(X_p, Y_p, s=2, alpha=0.5, c=dc_p, cmap='coolwarm')
-plt.colorbar(sc, ax=ax, label='DC Potential (V)')
-ax.set_xlabel('X (V)', fontweight='bold')
-ax.set_ylabel('Y (V)', fontweight='bold')
-ax.set_title('IQ Map (colored by DC potential)')
-ax.grid(True, alpha=0.3)
-ax.axis('equal')
+t_p  = t_RP1[sl]
 
 # --- R vs Time ---
-ax = axes[1, 0]
-ax.plot(t_p, R_p, lw=0.7, color='steelblue', label='R')
-ax2 = ax.twinx()
-ax2.plot(t_p, dc_p, lw=0.7, color='green', alpha=0.6, label='DC')
-ax.set_xlabel('Time (s)', fontweight='bold')
-ax.set_ylabel('R (V)', color='steelblue', fontweight='bold')
-ax2.set_ylabel('DC Potential (V)', color='green', fontweight='bold')
-ax.set_title('Time Series: R & DC Potential')
-ax.grid(True, alpha=0.3)
+ax_r.plot(t_p, R_p, lw=0.7, color='steelblue')
+ax_r.set_xlabel('Time (s)', fontweight='bold')
+ax_r.set_ylabel('R (V)', fontweight='bold')
+ax_r.set_title('R vs Time')
+ax_r.grid(True, alpha=0.3)
 
 # --- Theta vs Time ---
-ax = axes[1, 1]
-ax.plot(t_p, Th_p, lw=0.7, color='tomato', label='Theta')
-ax2 = ax.twinx()
-ax2.plot(t_p, dc_p, lw=0.7, color='green', alpha=0.6, label='DC')
-ax.set_xlabel('Time (s)', fontweight='bold')
-ax.set_ylabel(f'Phase ({theta_unit})', color='tomato', fontweight='bold')
-ax2.set_ylabel('DC Potential (V)', color='green', fontweight='bold')
-ax.set_title('Time Series: Phase & DC Potential')
-ax.grid(True, alpha=0.3)
+ax_th.plot(t_p, Th_p, lw=0.7, color='tomato')
+ax_th.set_xlabel('Time (s)', fontweight='bold')
+ax_th.set_ylabel(f'Theta ({theta_unit})', fontweight='bold')
+ax_th.set_title('Theta vs Time')
+ax_th.grid(True, alpha=0.3)
 
-# --- AC response map (scatter colored by phase) ---
-ax = axes[1, 2]
-sc2 = ax.scatter(dc_p, R_p, c=Th_p, s=2, alpha=0.6, cmap='viridis')
-plt.colorbar(sc2, ax=ax, label=f'Phase ({theta_unit})')
-ax.set_xlabel('DC Potential (V)', fontweight='bold')
-ax.set_ylabel('AC Magnitude R (V)', fontweight='bold')
-ax.set_title('AC Response Map (colored by phase)')
-ax.grid(True, alpha=0.3)
+# --- DC vs Time ---
+ax_dc.plot(t_p, dc_p, lw=0.7, color='green')
+ax_dc.set_xlabel('Time (s)', fontweight='bold')
+ax_dc.set_ylabel('DC Potential (V)', fontweight='bold')
+ax_dc.set_title('DC Voltage vs Time')
+ax_dc.grid(True, alpha=0.3)
+
+# --- R vs DC ---
+ax_rdc.scatter(dc_p, R_p, s=2, alpha=0.5, c='steelblue')
+ax_rdc.set_xlabel('DC Potential (V)', fontweight='bold')
+ax_rdc.set_ylabel('R (V)', fontweight='bold')
+ax_rdc.set_title('R vs DC Potential')
+ax_rdc.grid(True, alpha=0.3)
+
+# --- Theta vs DC ---
+ax_tdc.scatter(dc_p, Th_p, s=2, alpha=0.5, c='tomato')
+ax_tdc.set_xlabel('DC Potential (V)', fontweight='bold')
+ax_tdc.set_ylabel(f'Theta ({theta_unit})', fontweight='bold')
+ax_tdc.set_title('Theta vs DC Potential')
+ax_tdc.grid(True, alpha=0.3)
 
 plt.tight_layout()
 print(f"Plot rendered in {time.time() - t_plot:.2f}s")
