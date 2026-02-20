@@ -6,7 +6,8 @@ Connect your DC signal to IN1.
 
 To do AC CV use the startboth file
 
-AC bias from LIA is removed automatically via median filter.
+AC bias from LIA is removed automatically via Butterworth low-pass filter.
+Cutoff is set relative to the LIA reference frequency so it adapts automatically.
 
 Have a Great Day ;)
 
@@ -19,7 +20,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 import os
 from pyrpl import Pyrpl
-from scipy.signal import medfilt
+from scipy.signal import butter, filtfilt
 
 # ============================================================
 # MEASUREMENT PARAMETERS
@@ -46,10 +47,14 @@ ACQUISITION_MODE = 'CONTINUOUS'
 # AC BIAS REMOVAL
 # ============================================================
 # The LIA puts an AC sine on the same wire as the DC ramp.
-# A strong median filter removes it, leaving only the DC ramp.
-# Kernel must be ODD and large enough to span at least one full AC cycle.
+# A Butterworth low-pass filter removes it cleanly.
+# Cutoff is set as LIA_FREQUENCY / AC_REMOVAL_CUTOFF_DIVISOR.
+# e.g. LIA at 500 Hz + divisor 10 -> 50 Hz cutoff.
+# Increase divisor for more aggressive removal (further below LIA freq).
 AC_REMOVAL_ENABLED = True
-AC_REMOVAL_KERNEL  = 401   # increase if AC ripple is not fully removed
+LIA_FREQUENCY = 500        # Hz — must match REF_FREQUENCY in lockin script
+AC_REMOVAL_CUTOFF_DIVISOR = 10   # cutoff = LIA_FREQUENCY / this value
+AC_REMOVAL_ORDER = 4       # Butterworth filter order (4 is a good default)
 
 # ============================================================
 # PLOT DOWNSAMPLING
@@ -80,11 +85,23 @@ def downsample(arrays, n_samples, max_points, enabled=True):
     return ds, step, len(ds[0])
 
 
-def remove_ac_bias(signal, kernel_size=401):
-    """Remove AC bias using a strong median filter. Kernel must be odd."""
-    if kernel_size % 2 == 0:
-        kernel_size += 1
-    return medfilt(signal, kernel_size=kernel_size)
+def remove_ac_bias(signal, sample_rate, lia_freq, cutoff_divisor=10, order=4):
+    """
+    Remove AC bias using a Butterworth low-pass filter.
+    Cutoff is automatically set to lia_freq / cutoff_divisor.
+    This adapts to whatever LIA frequency you are using.
+    """
+    cutoff = lia_freq / cutoff_divisor
+    nyquist = sample_rate / 2.0
+
+    if cutoff >= nyquist:
+        print(f"  WARNING: Cutoff {cutoff:.1f} Hz >= Nyquist {nyquist:.1f} Hz. "
+              f"Skipping filter — reduce AC_REMOVAL_CUTOFF_DIVISOR or increase sample rate.")
+        return signal.copy()
+
+    b, a = butter(order, cutoff / nyquist, btype='low')
+    filtered = filtfilt(b, a, signal)
+    return filtered
 
 
 class RedPitayaDCLogger:
@@ -234,19 +251,27 @@ class RedPitayaDCLogger:
         if w > 1:
             corrected = np.convolve(corrected, np.ones(w) / w, mode='valid')
 
-        # ── Remove AC bias from LIA ───────────────────────────────────────────
+        n_samples = len(corrected)
+        effective_sample_rate = n_samples / actual_duration
+
+        # ── Remove AC bias from LIA via Butterworth filter ────────────────────
         if params.get('ac_removal_enabled', True):
-            kernel = params.get('ac_removal_kernel', 401)
-            print(f"Removing AC bias (median filter kernel={kernel})...")
-            corrected_clean = remove_ac_bias(corrected, kernel_size=kernel)
+            lia_freq  = params.get('lia_frequency', 500)
+            divisor   = params.get('ac_removal_cutoff_divisor', 10)
+            filt_order = params.get('ac_removal_order', 4)
+            cutoff    = lia_freq / divisor
+            print(f"Removing AC bias (Butterworth LP, LIA={lia_freq} Hz, "
+                  f"cutoff={cutoff:.1f} Hz, order={filt_order})...")
+            corrected_clean = remove_ac_bias(
+                corrected, effective_sample_rate, lia_freq,
+                cutoff_divisor=divisor, order=filt_order)
             print("AC bias removed.")
         else:
             corrected_clean = corrected.copy()
+            cutoff = None
 
-        n_samples = len(corrected_clean)
         sample_index = np.arange(n_samples)
         t = sample_index / (n_samples / actual_duration)
-        effective_sample_rate = n_samples / actual_duration
 
         print("\n" + "=" * 60)
         print("DC MEASUREMENT RESULTS")
@@ -254,6 +279,8 @@ class RedPitayaDCLogger:
         print(f"Mode:         {self.input_mode}")
         print(f"Duration:     {actual_duration:.3f}s  Samples: {n_samples:,}")
         print(f"Sample rate:  {effective_sample_rate:.2f} Hz")
+        if cutoff:
+            print(f"LP cutoff:    {cutoff:.1f} Hz  (LIA={lia_freq} Hz / {divisor})")
         print(f"Mean voltage: {np.mean(corrected_clean):.6f} V")
         print(f"Std dev:      {np.std(corrected_clean):.6f} V")
         print("=" * 60)
@@ -266,8 +293,12 @@ class RedPitayaDCLogger:
         t_p, v_p = ds_arrays
         ds_note = f' [1:{ds_step} for plot]' if ds_step > 1 else ''
 
+        filter_label = (f'Butterworth LP @ {cutoff:.1f} Hz'
+                        if params.get('ac_removal_enabled', True) and cutoff
+                        else 'No AC removal')
+
         plt.figure(figsize=(14, 6))
-        plt.plot(t_p, v_p, linewidth=0.8, label=f'DC Voltage (AC removed){ds_note}')
+        plt.plot(t_p, v_p, linewidth=0.8, label=f'DC Voltage ({filter_label}){ds_note}')
         plt.axhline(np.mean(corrected_clean), color='r', linestyle='--',
                     label=f"Mean {np.mean(corrected_clean):.6f} V")
         plt.fill_between(t_p,
@@ -277,7 +308,7 @@ class RedPitayaDCLogger:
                          label=f'+/-1sigma ({np.std(corrected_clean):.6f} V)')
         plt.xlabel("Time (s)")
         plt.ylabel("Voltage (V)")
-        plt.title(f"DC Voltage vs Time (AC bias removed) - {self.input_mode}\n"
+        plt.title(f"DC Voltage vs Time ({filter_label}) - {self.input_mode}\n"
                   f"{n_samples:,} samples @ {effective_sample_rate:.1f} Hz")
         plt.legend()
         plt.grid(True)
@@ -302,7 +333,9 @@ class RedPitayaDCLogger:
                 f.write(f"# Sample rate: {effective_sample_rate:.3f} Hz\n")
                 f.write(f"# Samples: {n_samples}\n")
                 f.write(f"# AC bias removal: {params.get('ac_removal_enabled', True)}"
-                        f"  kernel={params.get('ac_removal_kernel', 401)}\n")
+                        f"  LIA={params.get('lia_frequency', 500)} Hz"
+                        f"  cutoff={cutoff:.1f} Hz"
+                        f"  order={params.get('ac_removal_order', 4)}\n")
                 f.write(f"# Plot downsample step: {ds_step}x  (CSV is full resolution)\n")
                 f.write("Index,Time(s),DC_Voltage\n")
                 np.savetxt(f, np.column_stack((sample_index, t, corrected_clean)),
@@ -321,16 +354,18 @@ if __name__ == "__main__":
     )
 
     run_params = {
-        'timeout':                 MEASUREMENT_TIME,
-        'averaging_window':        AVERAGING_WINDOW,
-        'save_file':               SAVE_DATA,
-        'auto_calibrate':          AUTO_CALIBRATE,
-        'calibration_time':        CALIBRATION_TIME,
-        'acquisition_mode':        ACQUISITION_MODE,
-        'ac_removal_enabled':      AC_REMOVAL_ENABLED,
-        'ac_removal_kernel':       AC_REMOVAL_KERNEL,
-        'plot_downsample_enabled': PLOT_DOWNSAMPLE_ENABLED,
-        'plot_max_points':         PLOT_MAX_POINTS,
+        'timeout':                    MEASUREMENT_TIME,
+        'averaging_window':           AVERAGING_WINDOW,
+        'save_file':                  SAVE_DATA,
+        'auto_calibrate':             AUTO_CALIBRATE,
+        'calibration_time':           CALIBRATION_TIME,
+        'acquisition_mode':           ACQUISITION_MODE,
+        'ac_removal_enabled':         AC_REMOVAL_ENABLED,
+        'lia_frequency':              LIA_FREQUENCY,
+        'ac_removal_cutoff_divisor':  AC_REMOVAL_CUTOFF_DIVISOR,
+        'ac_removal_order':           AC_REMOVAL_ORDER,
+        'plot_downsample_enabled':    PLOT_DOWNSAMPLE_ENABLED,
+        'plot_max_points':            PLOT_MAX_POINTS,
     }
 
     print("=" * 60)
@@ -342,7 +377,12 @@ if __name__ == "__main__":
         print(f"  Gain:   {MANUAL_GAIN_FACTOR}x")
         print(f"  Offset: {MANUAL_DC_OFFSET}V")
     print(f"Acq. mode:        {ACQUISITION_MODE}")
-    print(f"AC bias removal:  {'ON  kernel=' + str(AC_REMOVAL_KERNEL) if AC_REMOVAL_ENABLED else 'OFF'}")
+    if AC_REMOVAL_ENABLED:
+        cutoff_display = LIA_FREQUENCY / AC_REMOVAL_CUTOFF_DIVISOR
+        print(f"AC bias removal:  ON  Butterworth LP @ {cutoff_display:.1f} Hz "
+              f"(LIA={LIA_FREQUENCY} Hz / {AC_REMOVAL_CUTOFF_DIVISOR}), order={AC_REMOVAL_ORDER}")
+    else:
+        print(f"AC bias removal:  OFF")
     print("=" * 60)
 
     rp.run(run_params)
