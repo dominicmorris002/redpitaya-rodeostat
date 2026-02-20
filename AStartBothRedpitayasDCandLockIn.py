@@ -9,7 +9,6 @@ SPEED IMPROVEMENTS vs old version:
 - All combined plots drawn directly from CSV data
 - Parallel CSV loading with threads
 - Butterworth LP filter AC removal applied to DC during merge
-  (cutoff auto-set to LIA_FREQUENCY / AC_REMOVAL_CUTOFF_DIVISOR)
 
 Have a Great Day :)
 
@@ -37,28 +36,14 @@ START_TIME_FILE  = "start_time.txt"
 ENTER_FEED_DELAY = 30  # seconds — increase if RP connection is slow
 
 # ── AC bias removal on merged DC ─────────────────────────────────────────────
-# Cutoff is set automatically as LIA_FREQUENCY / AC_REMOVAL_CUTOFF_DIVISOR.
-# Must match the REF_FREQUENCY set in the lock-in script.
-LIA_FREQUENCY            = 500   # Hz — keep in sync with lockin REF_FREQUENCY
-AC_REMOVAL_CUTOFF_DIVISOR = 10   # cutoff = LIA_FREQUENCY / this value (e.g. 50 Hz)
-AC_REMOVAL_ORDER         = 4     # Butterworth filter order
+AC_REMOVAL_FS     = 1_000_000  # your actual sampling rate (Hz)
+AC_REMOVAL_CUTOFF = 500        # choose well below LIA freq (Hz)
+AC_REMOVAL_ORDER  = 4
 
 # ============================================================
 
-def butter_lowpass_filter(signal, sample_rate, lia_freq, cutoff_divisor=10, order=4):
-    """
-    Remove AC bias using a Butterworth low-pass filter.
-    Cutoff is automatically set to lia_freq / cutoff_divisor.
-    """
-    cutoff  = lia_freq / cutoff_divisor
-    nyquist = sample_rate / 2.0
-
-    if cutoff >= nyquist:
-        print(f"  WARNING: Cutoff {cutoff:.1f} Hz >= Nyquist {nyquist:.1f} Hz — "
-              f"skipping filter. Reduce divisor or check sample rate.")
-        return signal.copy()
-
-    b, a = butter(order, cutoff / nyquist, btype='low')
+def butter_lowpass_filter(signal, fs, cutoff, order=4):
+    b, a = butter(order, cutoff / (fs / 2), btype='low')
     return filtfilt(b, a, signal)
 
 
@@ -78,9 +63,7 @@ for path, name in [(lockin_script, "lock-in"), (dc_script, "DC")]:
 
 print(f"Lock-in script: {lockin_script}")
 print(f"DC script:      {dc_script}")
-cutoff_display = LIA_FREQUENCY / AC_REMOVAL_CUTOFF_DIVISOR
-print(f"AC removal:     Butterworth LP @ {cutoff_display:.1f} Hz "
-      f"(LIA={LIA_FREQUENCY} Hz / {AC_REMOVAL_CUTOFF_DIVISOR}), order={AC_REMOVAL_ORDER}")
+print(f"AC removal:     Butterworth LP  fs={AC_REMOVAL_FS} Hz  cutoff={AC_REMOVAL_CUTOFF} Hz  order={AC_REMOVAL_ORDER}")
 print("=" * 60)
 
 input("\nPress Enter to start both acquisitions...")
@@ -168,26 +151,17 @@ if   'Theta(deg)' in lockin_data.columns: theta_col, theta_unit = 'Theta(deg)', 
 elif 'Theta(rad)' in lockin_data.columns: theta_col, theta_unit = 'Theta(rad)', 'rad'
 else:                                      theta_col, theta_unit = lockin_data.columns[3], 'deg'
 
-dc_col = 'DC_Voltage' if 'DC_Voltage' in dc_data.columns else 'Voltage(V)'
-dc_raw = dc_data[dc_col].values[:n_samples]
+dc_col  = 'DC_Voltage' if 'DC_Voltage' in dc_data.columns else 'Voltage(V)'
+dc_raw  = dc_data[dc_col].values[:n_samples]
+t_RP2   = dc_data['Time(s)'].values[:n_samples]
 
-# ── Butterworth low-pass filter: remove AC bias keyed to LIA frequency ───────
-t_RP2       = dc_data['Time(s)'].values[:n_samples]
-dc_duration = t_RP2[-1] - t_RP2[0]
-dc_sample_rate = n_samples / dc_duration if dc_duration > 0 else 1000.0
-cutoff = LIA_FREQUENCY / AC_REMOVAL_CUTOFF_DIVISOR
-
-print(f"\nApplying AC bias removal...")
-print(f"  DC sample rate:  {dc_sample_rate:.1f} Hz")
-print(f"  LIA frequency:   {LIA_FREQUENCY} Hz")
-print(f"  LP cutoff:       {cutoff:.1f} Hz  (LIA / {AC_REMOVAL_CUTOFF_DIVISOR})")
-print(f"  Filter order:    {AC_REMOVAL_ORDER}")
-
+# ── Butterworth low-pass: remove AC bias from DC ramp ────────────────────────
+print(f"\nApplying AC bias removal "
+      f"(Butterworth LP: fs={AC_REMOVAL_FS} Hz, cutoff={AC_REMOVAL_CUTOFF} Hz, order={AC_REMOVAL_ORDER})...")
 t_filt   = time.time()
-dc_clean = butter_lowpass_filter(dc_raw.astype(float), dc_sample_rate,
-                                 LIA_FREQUENCY, AC_REMOVAL_CUTOFF_DIVISOR,
-                                 AC_REMOVAL_ORDER)
-print(f"  Filter done in {time.time() - t_filt:.2f}s")
+dc_clean = butter_lowpass_filter(dc_raw.astype(float),
+                                 AC_REMOVAL_FS, AC_REMOVAL_CUTOFF, AC_REMOVAL_ORDER)
+print(f"Filter done in {time.time() - t_filt:.2f}s")
 
 R     = lockin_data['R(V)'].values[:n_samples]
 Theta = lockin_data[theta_col].values[:n_samples]
@@ -225,8 +199,7 @@ t_plot = time.time()
 
 fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 fig.suptitle(f'AC Cyclic Voltammetry -- Synchronized Dual Red Pitaya\n'
-             f'{n_samples:,} samples  |  AC removed: Butterworth LP @ {cutoff:.1f} Hz '
-             f'(LIA={LIA_FREQUENCY} Hz)',
+             f'{n_samples:,} samples  |  AC removed: Butterworth LP @ {AC_REMOVAL_CUTOFF} Hz',
              fontsize=14, fontweight='bold')
 
 # Downsample for plotting only
