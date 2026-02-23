@@ -23,13 +23,13 @@ from scipy.signal import butter, filtfilt
 # MEASUREMENT PARAMETERS
 # ============================================================
 MEASUREMENT_TIME = 12.0  # seconds
-DECIMATION = 8
+DECIMATION = 1024
 AVERAGING_WINDOW = 1
 
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'MANUAL'
-MANUAL_GAIN_FACTOR = 28.93002007*-1   #28.93002007*-1
-MANUAL_DC_OFFSET = -0.016903         #-0.016903
+MANUAL_GAIN_FACTOR = -1   #28.93002007*-1
+MANUAL_DC_OFFSET = 0         #-0.016903
 
 AUTO_CALIBRATE = True  # Only used if INPUT_MODE = 'AUTO'
 CALIBRATION_TIME = 2.0  # seconds
@@ -43,14 +43,23 @@ ACQUISITION_MODE = 'CONTINUOUS'
 # ============================================================
 # AC BIAS REMOVAL
 # ============================================================
-# Removes residual AC from the lock-in reference that leaks into
-# the DC channel. Set cutoff well below REF_FREQUENCY (e.g. if
-# LIA runs at 500 Hz, a 50 Hz cutoff removes it cleanly).
-# The effective sample rate is 125e6 / DECIMATION -- make sure
-# AC_REMOVAL_CUTOFF is below half that (Nyquist).
+# The signal contains a slow DC ramp + a 500 Hz AC wave (±0.2 V).
+# To recover just the DC ramp we low-pass filter WELL BELOW the
+# AC frequency.  Rule of thumb: cutoff <= AC_freq / 10.
+#
+# With DECIMATION=8 the sample rate is 125e6/8 = 15.625 MHz,
+# so Nyquist is ~7.8 MHz -- any cutoff well below 500 Hz is safe.
+#
+# AC_REMOVAL_CUTOFF must be:
+#   (a) well BELOW  your AC signal frequency  (500 Hz) -- to reject it
+#   (b) well ABOVE  your DC ramp bandwidth    (< 1 Hz) -- to keep it
+#
+# 50 Hz is a good default for a 500 Hz AC signal.
+# Lower it (e.g. 10 Hz) if your ramp is very slow and you want
+# cleaner suppression; raise it (e.g. 100 Hz) if the ramp is fast.
 AC_REMOVAL_ENABLED = True
-AC_REMOVAL_CUTOFF  = 500    # Hz -- set well below your LIA frequency
-AC_REMOVAL_ORDER   = 4     # Butterworth order (4 is a good default)
+AC_REMOVAL_CUTOFF  = 50      # Hz -- MUST be well below your AC frequency (500 Hz)
+AC_REMOVAL_ORDER   = 4       # Butterworth order (4 is a good default)
 # ============================================================
 
 # ============================================================
@@ -93,7 +102,10 @@ def remove_ac_bias(signal, fs, cutoff, order=4):
     ----------
     signal  : 1-D numpy array  -- the raw voltage trace
     fs      : float            -- actual sample rate in Hz (125e6 / DECIMATION)
-    cutoff  : float            -- low-pass cutoff in Hz (keep well below LIA freq)
+    cutoff  : float            -- low-pass cutoff in Hz
+                                  MUST be well below your AC frequency and
+                                  well above your DC ramp bandwidth.
+                                  For a 500 Hz AC signal use ~50 Hz.
     order   : int              -- Butterworth filter order (default 4)
 
     Returns
@@ -106,8 +118,12 @@ def remove_ac_bias(signal, fs, cutoff, order=4):
             f"AC_REMOVAL_CUTOFF ({cutoff} Hz) must be less than Nyquist "
             f"({nyq:.1f} Hz). Lower the cutoff or raise DECIMATION."
         )
+    if cutoff <= 0:
+        raise ValueError("AC_REMOVAL_CUTOFF must be greater than 0 Hz.")
+
     b, a = butter(order, cutoff / nyq, btype='low')
     # filtfilt applies the filter twice (forward + backward) so phase is zero
+    # (no time-shift in the recovered DC ramp)
     return filtfilt(b, a, signal)
 
 
@@ -309,6 +325,10 @@ class RedPitayaDCLogger:
             print(f"Applied {w}-sample moving average")
 
         # ── AC Bias Removal ───────────────────────────────────────────────────
+        # Strategy: low-pass filter retains only the slow DC ramp.
+        # The cutoff MUST be well below the AC signal frequency (500 Hz).
+        # A cutoff of 50 Hz gives ~80 dB of attenuation at 500 Hz with a
+        # 4th-order Butterworth, cleanly stripping the ±0.2 V AC component.
         ac_enabled = params.get('ac_removal_enabled', False)
         ac_cutoff  = params.get('ac_removal_cutoff',  50)
         ac_order   = params.get('ac_removal_order',   4)
@@ -317,17 +337,19 @@ class RedPitayaDCLogger:
         if ac_enabled:
             fs = self.nominal_sample_rate
             print(f"\nApplying AC bias removal...")
-            print(f"  Sample rate: {fs:.1f} Hz")
-            print(f"  Low-pass cutoff: {ac_cutoff} Hz  (order {ac_order} Butterworth)")
+            print(f"  Sample rate:       {fs:.1f} Hz")
+            print(f"  AC signal freq:    500 Hz (±0.2 V)")
+            print(f"  Low-pass cutoff:   {ac_cutoff} Hz  (order {ac_order} Butterworth)")
+            print(f"  Attenuation @ 500 Hz: ~{20*ac_order*np.log10(500/ac_cutoff):.0f} dB")
             try:
                 corrected_filtered = remove_ac_bias(corrected, fs, ac_cutoff, ac_order)
-                ac_removed = corrected - corrected_filtered  # the AC component stripped out
-                ac_rms = np.sqrt(np.mean(ac_removed ** 2))
+                ac_removed = corrected - corrected_filtered  # the stripped AC component
+                ac_rms  = np.sqrt(np.mean(ac_removed ** 2))
                 ac_peak = (np.max(ac_removed) - np.min(ac_removed)) / 2
-                print(f"  AC component RMS: {ac_rms*1000:.4f} mV  peak: {ac_peak*1000:.4f} mV")
+                print(f"  AC component RMS:  {ac_rms*1000:.4f} mV  peak: {ac_peak*1000:.4f} mV")
                 corrected = corrected_filtered
-                ac_label = f' [AC<{ac_cutoff}Hz removed]'
-                print(f"  AC bias removal applied successfully")
+                ac_label = f' [AC<{ac_cutoff}Hz LP filtered]'
+                print(f"  AC bias removal applied successfully -- DC ramp recovered.")
             except ValueError as e:
                 print(f"  WARNING: AC bias removal skipped -- {e}")
                 ac_enabled = False
@@ -383,7 +405,7 @@ class RedPitayaDCLogger:
 
         # ── Plot ─────────────────────────────────────────────────────────────
         plt.figure(figsize=(14, 6))
-        plt.plot(t_p, v_p, linewidth=0.8, label=f'Voltage{ds_note}{ac_label}')
+        plt.plot(t_p, v_p, linewidth=0.8, label=f'DC Ramp{ds_note}{ac_label}')
         plt.axhline(np.mean(corrected), color='r', linestyle='--',
                     label=f"Mean {np.mean(corrected):.6f} V")
         plt.fill_between(t_p,
