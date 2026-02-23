@@ -3,8 +3,8 @@ Synchronous dual Red Pitaya data acquisition - ACCV Style
 Plots styled for AC Cyclic Voltammetry visualization
 
 Press Enter ONCE here to launch both acquisitions simultaneously.
-The Enter keypress is automatically forwarded to both scripts so
-they start together without any extra keypresses needed.
+Then press Enter a SECOND time when both RPs are connected and ready
+to fire the measurement start to both at the same instant.
 
 Have a Great Day :)
 
@@ -28,11 +28,6 @@ import glob
 # ============================================================
 OUTPUT_DIRECTORY = 'test_data'
 START_TIME_FILE  = "start_time.txt"
-
-# How long to wait before feeding Enter to each subprocess.
-# This needs to be long enough for both RPs to connect and reach
-# their input() prompt. Increase if connection is slow.
-ENTER_FEED_DELAY = 40  # seconds
 
 # ============================================================
 # COMBINED PLOT DOWNSAMPLING
@@ -66,7 +61,7 @@ print(f"Lock-in script:  {lockin_script}")
 print(f"DC script:       {dc_script}")
 print("=" * 60)
 
-# ── Single Enter press ────────────────────────────────────────────────────────
+# ── First Enter: launch subprocesses ─────────────────────────────────────────
 input("\nPress Enter to start both acquisitions...")
 print("")
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,29 +73,23 @@ with open(START_TIME_FILE, "w") as f:
     f.write(START_TIME.isoformat())
 
 print(f"Start time: {START_TIME.strftime('%Y-%m-%d %H:%M:%S.%f')}")
-print(f"Launching both acquisitions (will auto-start in ~{ENTER_FEED_DELAY}s once RPs connect)...")
+print("Launching both subprocesses -- watch for both RPs to connect below...")
+print("")
 
-# Launch both subprocesses with stdin=PIPE so we can feed them
-# a newline to satisfy their input() prompts automatically.
+# Launch both subprocesses with stdin=PIPE so we can feed them a newline
 proc_lockin = subprocess.Popen([python_exe, lockin_script], stdin=subprocess.PIPE)
 proc_dc     = subprocess.Popen([python_exe, dc_script],     stdin=subprocess.PIPE)
 
-# Background threads feed a newline to each process after ENTER_FEED_DELAY.
-# Both scripts connect to their RP and reach input() within that window,
-# then both receive Enter at (almost) the same instant.
-def feed_enter(proc, delay, name):
-    time.sleep(delay)
-    try:
-        proc.stdin.write(b"\n")
-        proc.stdin.flush()
-        print(f"  -> Sent Enter to {name}")
-    except Exception as e:
-        print(f"  -> Could not send Enter to {name}: {e}")
-
-t_lockin = threading.Thread(target=feed_enter, args=(proc_lockin, ENTER_FEED_DELAY, "lock-in"), daemon=True)
-t_dc     = threading.Thread(target=feed_enter, args=(proc_dc,     ENTER_FEED_DELAY, "DC"),      daemon=True)
-t_lockin.start()
-t_dc.start()
+# ── Second Enter: fires both the instant YOU choose ──────────────────────────
+input("Press Enter when both RPs are connected and ready to start measurement...")
+print("")
+proc_lockin.stdin.write(b"\n")
+proc_lockin.stdin.flush()
+proc_dc.stdin.write(b"\n")
+proc_dc.stdin.flush()
+print("  -> Sent Enter to lock-in")
+print("  -> Sent Enter to DC")
+# ─────────────────────────────────────────────────────────────────────────────
 
 print("Waiting for acquisitions to complete...")
 proc_lockin.wait()
