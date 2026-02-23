@@ -6,8 +6,6 @@ Connect your DC signal to IN1.
 
 To do AC CV use the startboth file
 
-AC bias from LIA is removed via Butterworth low-pass filter.
-
 Have a Great Day ;)
 
 Dominic Morris
@@ -30,8 +28,8 @@ AVERAGING_WINDOW = 1
 
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'MANUAL'
-MANUAL_GAIN_FACTOR = 28.93002007 * -1
-MANUAL_DC_OFFSET = -0.016903
+MANUAL_GAIN_FACTOR = 28.93002007*-1   #28.93002007*-1
+MANUAL_DC_OFFSET = -0.016903         #-0.016903
 
 AUTO_CALIBRATE = True  # Only used if INPUT_MODE = 'AUTO'
 CALIBRATION_TIME = 2.0  # seconds
@@ -45,26 +43,34 @@ ACQUISITION_MODE = 'CONTINUOUS'
 # ============================================================
 # AC BIAS REMOVAL
 # ============================================================
+# Removes residual AC from the lock-in reference that leaks into
+# the DC channel. Set cutoff well below REF_FREQUENCY (e.g. if
+# LIA runs at 500 Hz, a 50 Hz cutoff removes it cleanly).
+# The effective sample rate is 125e6 / DECIMATION -- make sure
+# AC_REMOVAL_CUTOFF is below half that (Nyquist).
 AC_REMOVAL_ENABLED = True
-AC_REMOVAL_FS      = 1_000_000  # your actual sampling rate (Hz)
-AC_REMOVAL_CUTOFF  = 500        # choose well below LIA freq (Hz)
-AC_REMOVAL_ORDER   = 4
+AC_REMOVAL_CUTOFF  = 500    # Hz -- set well below your LIA frequency
+AC_REMOVAL_ORDER   = 4     # Butterworth order (4 is a good default)
+# ============================================================
 
 # ============================================================
 # PLOT DOWNSAMPLING
 # ============================================================
+# CSV always saves full resolution data no matter what.
 PLOT_DOWNSAMPLE_ENABLED = True
 PLOT_MAX_POINTS = 50_000
 # ============================================================
 
 START_TIME_FILE = "start_time.txt"
+
+# Synchronization with other processes
 try:
     with open(START_TIME_FILE, "r") as f:
         START_TIME = datetime.fromisoformat(f.read().strip())
     while datetime.now() < START_TIME:
         time.sleep(0.001)
 except FileNotFoundError:
-    pass
+    pass  # No sync file, start immediately
 
 
 # ============================================================
@@ -80,12 +86,34 @@ def downsample(arrays, n_samples, max_points, enabled=True):
 
 
 def remove_ac_bias(signal, fs, cutoff, order=4):
-    """Remove AC bias using a Butterworth low-pass filter."""
-    b, a = butter(order, cutoff / (fs / 2), btype='low')
+    """
+    Remove AC bias using a zero-phase Butterworth low-pass filter.
+
+    Parameters
+    ----------
+    signal  : 1-D numpy array  -- the raw voltage trace
+    fs      : float            -- actual sample rate in Hz (125e6 / DECIMATION)
+    cutoff  : float            -- low-pass cutoff in Hz (keep well below LIA freq)
+    order   : int              -- Butterworth filter order (default 4)
+
+    Returns
+    -------
+    filtered : 1-D numpy array -- DC-only signal with AC component removed
+    """
+    nyq = fs / 2.0
+    if cutoff >= nyq:
+        raise ValueError(
+            f"AC_REMOVAL_CUTOFF ({cutoff} Hz) must be less than Nyquist "
+            f"({nyq:.1f} Hz). Lower the cutoff or raise DECIMATION."
+        )
+    b, a = butter(order, cutoff / nyq, btype='low')
+    # filtfilt applies the filter twice (forward + backward) so phase is zero
     return filtfilt(b, a, signal)
 
 
 class RedPitayaDCLogger:
+    """DC voltage logger using lock-in style acquisition"""
+
     allowed_decimations = [1, 8, 64, 1024, 8192, 65536]
 
     def __init__(self, output_dir='test_data', input_mode='AUTO',
@@ -100,25 +128,32 @@ class RedPitayaDCLogger:
         self.buffers = []
         self.capture_times = []
 
+        # Setup input gain scaling and DC offset
         self.input_gain_factor = manual_gain
         self.input_dc_offset = manual_offset
         self.input_mode_setting = input_mode.upper()
         self.input_mode = "Unknown"
 
         if self.input_mode_setting == 'MANUAL':
+            self.input_gain_factor = manual_gain
+            self.input_dc_offset = manual_offset
             self.input_mode = f"MANUAL ({manual_gain}x gain, {manual_offset}V offset)"
+            print(f"Input mode: {self.input_mode}")
         elif self.input_mode_setting == 'LV':
             self.input_gain_factor = 1.0
             self.input_dc_offset = 0.0
-            self.input_mode = "LV (+-1V)"
+            self.input_mode = "LV (±1V)"
+            print(f"Input mode: {self.input_mode}")
         elif self.input_mode_setting == 'HV':
             self.input_gain_factor = 20.0
             self.input_dc_offset = 0.0
-            self.input_mode = "HV (+-20V, 20:1 divider)"
+            self.input_mode = "HV (±20V, 20:1 divider)"
+            print(f"Input mode: {self.input_mode}")
         elif self.input_mode_setting == 'AUTO':
             self.input_mode = "AUTO (will calibrate)"
-        print(f"Input mode: {self.input_mode}")
+            print("Input mode: AUTO - will auto-detect")
 
+        # Scope setup (matches lock-in style)
         self.scope.input1 = 'in1'
         self.scope.input2 = 'in1'
         self.scope.decimation = DECIMATION
@@ -129,7 +164,9 @@ class RedPitayaDCLogger:
         self.scope._start_acquisition_rolling_mode()
         self.scope.average = True
         self.nominal_sample_rate = 125e6 / self.scope.decimation
-        print(f"DC Logger initialized | Sample rate: {self.nominal_sample_rate:.2f} Hz")
+
+        print(f"DC Logger initialized")
+        print(f"Nominal sample rate: {self.nominal_sample_rate:.2f} Hz")
 
     def calibrate_input_gain(self, cal_freq=100, cal_amp=1.0, cal_time=2.0, force=False):
         if not force and self.input_mode_setting != 'AUTO':
@@ -140,75 +177,112 @@ class RedPitayaDCLogger:
         print("CALIBRATING INPUT SCALING AND DC OFFSET...")
         print("=" * 60)
 
+        print("Step 1: Measuring DC offset on IN1 (no signal)...")
         self.asg.output_direct = 'off'
         self.scope.input1 = 'in1'
+        self.scope.input2 = 'in1'
         time.sleep(0.3)
 
         offset_samples = []
         for _ in range(10):
             self.scope.single()
             offset_samples.append(np.mean(self.scope._data_ch1_current))
-        self.input_dc_offset = np.mean(offset_samples)
-        print(f"  DC offset: {self.input_dc_offset:.6f}V")
 
+        self.input_dc_offset = np.mean(offset_samples)
+        print(f"  Measured DC offset: {self.input_dc_offset:.6f}V")
+
+        print(f"\nStep 2: Measuring gain with {cal_amp}V @ {cal_freq} Hz...")
         self.scope.input1 = 'out1'
         self.scope.input2 = 'in1'
-        self.asg.setup(frequency=cal_freq, amplitude=cal_amp, offset=0,
-                       waveform='sin', trigger_source='immediately')
+
+        self.asg.setup(
+            frequency=cal_freq,
+            amplitude=cal_amp,
+            offset=0,
+            waveform='sin',
+            trigger_source='immediately'
+        )
         self.asg.output_direct = 'out1'
         time.sleep(0.5)
 
-        cal_out1, cal_in1 = [], []
-        t0 = time.time()
-        while (time.time() - t0) < cal_time:
+        cal_out1 = []
+        cal_in1 = []
+        start_time = time.time()
+
+        while (time.time() - start_time) < cal_time:
             self.scope.single()
             cal_out1.append(np.array(self.scope._data_ch1_current))
             cal_in1.append(np.array(self.scope._data_ch2_current))
 
         all_out1 = np.concatenate(cal_out1)
-        all_in1  = np.concatenate(cal_in1) - self.input_dc_offset
+        all_in1 = np.concatenate(cal_in1)
+        all_in1_corrected = all_in1 - self.input_dc_offset
+
         out1_peak = (np.max(all_out1) - np.min(all_out1)) / 2
-        in1_peak  = (np.max(all_in1)  - np.min(all_in1))  / 2
+        in1_peak = (np.max(all_in1_corrected) - np.min(all_in1_corrected)) / 2
+        out1_rms = np.sqrt(np.mean(all_out1 ** 2))
+        in1_rms = np.sqrt(np.mean(all_in1_corrected ** 2))
+
         self.input_gain_factor = out1_peak / in1_peak
+        gain_rms = out1_rms / in1_rms
 
-        if   self.input_gain_factor < 1.05: self.input_mode = "LV (+-1V)"
-        elif self.input_gain_factor < 2.0:  self.input_mode = f"LV with loading ({self.input_gain_factor:.2f}x)"
-        elif self.input_gain_factor < 15:   self.input_mode = f"Custom ({self.input_gain_factor:.2f}x)"
-        else:                               self.input_mode = f"HV ({self.input_gain_factor:.1f}:1)"
+        if self.input_gain_factor < 1.05:
+            self.input_mode = "LV (±1V)"
+        elif self.input_gain_factor < 2.0:
+            self.input_mode = f"LV with loading ({self.input_gain_factor:.2f}x)"
+        elif self.input_gain_factor < 15:
+            self.input_mode = f"Custom/Unknown mode ({self.input_gain_factor:.2f}x)"
+        else:
+            self.input_mode = f"HV (±20V, {self.input_gain_factor:.1f}:1 divider)"
 
-        print(f"  Gain: {self.input_gain_factor:.4f}x  Mode: {self.input_mode}")
+        print(f"\n  OUT1 peak: {out1_peak:.4f}V, RMS: {out1_rms:.4f}V")
+        print(f"  IN1 peak (after offset correction): {in1_peak:.4f}V, RMS: {in1_rms:.4f}V")
+        print(f"  Gain (peak-based): {self.input_gain_factor:.4f}x")
+        print(f"  Gain (RMS-based): {gain_rms:.4f}x")
+        print(f"  DC offset: {self.input_dc_offset:.6f}V")
+        print(f"  Detected mode: {self.input_mode}")
         print("=" * 60 + "\n")
 
         self.asg.output_direct = 'off'
         self.scope.input1 = 'in1'
         self.scope.input2 = 'in1'
+
         return self.input_gain_factor
 
-    def capture_buffer_continuous(self):
+    def capture_buffer(self):
+        """Single-shot: trigger a capture and wait for it"""
+        self.scope.single()
         ch1 = np.array(self.scope._data_ch1_current)
         self.buffers.append(ch1)
         self.capture_times.append(time.time())
 
-    def capture_buffer(self):
-        self.scope.single()
+    def capture_buffer_continuous(self):
+        """Continuous: just read whatever is currently in the buffer"""
         ch1 = np.array(self.scope._data_ch1_current)
         self.buffers.append(ch1)
         self.capture_times.append(time.time())
 
     def run(self, params):
         if params.get('auto_calibrate', False):
-            self.calibrate_input_gain(cal_time=params.get('calibration_time', 2.0))
+            self.calibrate_input_gain(
+                cal_freq=100,
+                cal_amp=1.0,
+                cal_time=params.get('calibration_time', 2.0)
+            )
 
+        # ── Wait for Enter before starting measurement ────────────────────────
         input("\nPress Enter to start measurement...")
         print("")
+        # ─────────────────────────────────────────────────────────────────────
 
-        print("Allowing scope to settle...")
+        print("\nAllowing scope to settle...")
         time.sleep(0.3)
 
         acquisition_start = time.time()
         print(f"Started: {datetime.fromtimestamp(acquisition_start).strftime('%Y-%m-%d %H:%M:%S.%f')}")
 
         acq_mode = params.get('acquisition_mode', 'SINGLE_SHOT')
+
         if acq_mode == 'CONTINUOUS':
             self.scope.continuous()
             time.sleep(0.1)
@@ -225,73 +299,107 @@ class RedPitayaDCLogger:
         capture_count = len(self.buffers)
         print(f"Captured {capture_count} buffers")
 
+        # ── Concatenate and correct ───────────────────────────────────────────
         raw = np.concatenate(self.buffers)
         corrected = (raw - self.input_dc_offset) * self.input_gain_factor
 
         w = params.get('averaging_window', 1)
         if w > 1:
             corrected = np.convolve(corrected, np.ones(w) / w, mode='valid')
+            print(f"Applied {w}-sample moving average")
+
+        # ── AC Bias Removal ───────────────────────────────────────────────────
+        ac_enabled = params.get('ac_removal_enabled', False)
+        ac_cutoff  = params.get('ac_removal_cutoff',  50)
+        ac_order   = params.get('ac_removal_order',   4)
+        ac_label   = ''
+
+        if ac_enabled:
+            fs = self.nominal_sample_rate
+            print(f"\nApplying AC bias removal...")
+            print(f"  Sample rate: {fs:.1f} Hz")
+            print(f"  Low-pass cutoff: {ac_cutoff} Hz  (order {ac_order} Butterworth)")
+            try:
+                corrected_filtered = remove_ac_bias(corrected, fs, ac_cutoff, ac_order)
+                ac_removed = corrected - corrected_filtered  # the AC component stripped out
+                ac_rms = np.sqrt(np.mean(ac_removed ** 2))
+                ac_peak = (np.max(ac_removed) - np.min(ac_removed)) / 2
+                print(f"  AC component RMS: {ac_rms*1000:.4f} mV  peak: {ac_peak*1000:.4f} mV")
+                corrected = corrected_filtered
+                ac_label = f' [AC<{ac_cutoff}Hz removed]'
+                print(f"  AC bias removal applied successfully")
+            except ValueError as e:
+                print(f"  WARNING: AC bias removal skipped -- {e}")
+                ac_enabled = False
+        # ─────────────────────────────────────────────────────────────────────
 
         n_samples = len(corrected)
-        actual_duration = time.time() - acquisition_start
-
-        # ── Remove AC bias via Butterworth low-pass ───────────────────────────
-        if params.get('ac_removal_enabled', True):
-            fs     = params.get('ac_removal_fs', 1_000_000)
-            cutoff = params.get('ac_removal_cutoff', 500)
-            order  = params.get('ac_removal_order', 4)
-            print(f"Removing AC bias (Butterworth LP: fs={fs} Hz, cutoff={cutoff} Hz, order={order})...")
-            corrected_clean = remove_ac_bias(corrected, fs, cutoff, order)
-            print("AC bias removed.")
-        else:
-            corrected_clean = corrected.copy()
-            fs = cutoff = order = None
-
         sample_index = np.arange(n_samples)
         t = sample_index / (n_samples / actual_duration)
         effective_sample_rate = n_samples / actual_duration
 
+        # Buffer timing diagnostics
+        samples_per_buffer = n_samples / capture_count
+        data_time_per_buffer = samples_per_buffer / self.nominal_sample_rate
+        buffer_spacing = actual_duration / capture_count
+        dead_time = buffer_spacing - data_time_per_buffer
+
         print("\n" + "=" * 60)
         print("DC MEASUREMENT RESULTS")
         print("=" * 60)
-        print(f"Mode:         {self.input_mode}")
-        print(f"Duration:     {actual_duration:.3f}s  Samples: {n_samples:,}")
-        print(f"Sample rate:  {effective_sample_rate:.2f} Hz")
-        if cutoff:
-            print(f"LP filter:    fs={fs} Hz  cutoff={cutoff} Hz  order={order}")
-        print(f"Mean voltage: {np.mean(corrected_clean):.6f} V")
-        print(f"Std dev:      {np.std(corrected_clean):.6f} V")
+        print(f"Mode:          {self.input_mode}")
+        print(f"Acq. mode:     {acq_mode}")
+        print(f"Gain:          {self.input_gain_factor:.4f}x")
+        print(f"DC offset:     {self.input_dc_offset:.6f}V")
+        print(f"AC removal:    {'ON -- cutoff ' + str(ac_cutoff) + ' Hz' if ac_enabled else 'OFF'}")
+        print(f"Duration:      {actual_duration:.3f}s")
+        print(f"Samples:       {n_samples:,}")
+        print(f"Sample rate:   {effective_sample_rate:.2f} Hz")
+        print(f"Mean voltage:  {np.mean(corrected):.6f} V")
+        print(f"Std dev:       {np.std(corrected):.6f} V")
+        print(f"\nBuffer stats:")
+        print(f"  Buffers: {capture_count}")
+        print(f"  Samples/buf: {samples_per_buffer:.0f}")
+        print(f"  Gap/buf: {dead_time * 1000:.1f} ms")
+        print(f"  Dead time: {dead_time * capture_count:.2f}s "
+              f"({dead_time * capture_count / actual_duration * 100:.1f}%)")
         print("=" * 60)
 
         # ── Downsample for plotting ───────────────────────────────────────────
         ds_on  = params.get('plot_downsample_enabled', True)
         ds_max = params.get('plot_max_points', 50_000)
+
         ds_arrays, ds_step, n_plot = downsample(
-            [t, corrected_clean], n_samples, ds_max, enabled=ds_on)
+            [t, corrected], n_samples, ds_max, enabled=ds_on)
         t_p, v_p = ds_arrays
+
+        if ds_step > 1:
+            print(f"\nDownsampled: {n_samples:,} -> {n_plot:,} pts "
+                  f"(step={ds_step}) for plotting. CSV = full res.")
+        else:
+            print(f"\nNo downsampling needed ({n_samples:,} pts)")
+
         ds_note = f' [1:{ds_step} for plot]' if ds_step > 1 else ''
 
-        filter_label = (f'Butterworth LP @ {cutoff} Hz'
-                        if params.get('ac_removal_enabled', True) and cutoff
-                        else 'No AC removal')
-
+        # ── Plot ─────────────────────────────────────────────────────────────
         plt.figure(figsize=(14, 6))
-        plt.plot(t_p, v_p, linewidth=0.8, label=f'DC Voltage ({filter_label}){ds_note}')
-        plt.axhline(np.mean(corrected_clean), color='r', linestyle='--',
-                    label=f"Mean {np.mean(corrected_clean):.6f} V")
+        plt.plot(t_p, v_p, linewidth=0.8, label=f'Voltage{ds_note}{ac_label}')
+        plt.axhline(np.mean(corrected), color='r', linestyle='--',
+                    label=f"Mean {np.mean(corrected):.6f} V")
         plt.fill_between(t_p,
-                         np.mean(corrected_clean) - np.std(corrected_clean),
-                         np.mean(corrected_clean) + np.std(corrected_clean),
-                         alpha=0.15, color='blue',
-                         label=f'+/-1sigma ({np.std(corrected_clean):.6f} V)')
+                         np.mean(corrected) - np.std(corrected),
+                         np.mean(corrected) + np.std(corrected),
+                         alpha=0.15, color='blue', label=f'+/-1σ ({np.std(corrected):.6f} V)')
         plt.xlabel("Time (s)")
         plt.ylabel("Voltage (V)")
-        plt.title(f"DC Voltage vs Time ({filter_label}) - {self.input_mode}\n"
-                  f"{n_samples:,} samples @ {effective_sample_rate:.1f} Hz")
+        plt.title(f"DC Voltage vs Time - {self.input_mode}\n"
+                  f"Acq: {acq_mode}  |  {n_samples:,} samples @ {effective_sample_rate:.1f} Hz"
+                  f"{ac_label}")
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
 
+        # ── Save ─────────────────────────────────────────────────────────────
         if params['save_file']:
             os.makedirs(self.output_dir, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -307,14 +415,13 @@ class RedPitayaDCLogger:
                 f.write(f"# Acquisition: {acq_mode}\n")
                 f.write(f"# Gain: {self.input_gain_factor:.6f}\n")
                 f.write(f"# Offset: {self.input_dc_offset:.6f}\n")
+                f.write(f"# AC removal: {'cutoff=' + str(ac_cutoff) + ' Hz order=' + str(ac_order) if ac_enabled else 'disabled'}\n")
                 f.write(f"# Duration: {actual_duration:.6f}\n")
                 f.write(f"# Sample rate: {effective_sample_rate:.3f} Hz\n")
                 f.write(f"# Samples: {n_samples}\n")
-                f.write(f"# AC bias removal: {params.get('ac_removal_enabled', True)}"
-                        f"  fs={fs}  cutoff={cutoff} Hz  order={order}\n")
                 f.write(f"# Plot downsample step: {ds_step}x  (CSV is full resolution)\n")
-                f.write("Index,Time(s),DC_Voltage\n")
-                np.savetxt(f, np.column_stack((sample_index, t, corrected_clean)),
+                f.write("Index,Time(s),Voltage(V)\n")
+                np.savetxt(f, np.column_stack((sample_index, t, corrected)),
                            delimiter=",", fmt="%.10f")
             print(f"Data: {csv_path}")
         else:
@@ -336,12 +443,12 @@ if __name__ == "__main__":
         'auto_calibrate':          AUTO_CALIBRATE,
         'calibration_time':        CALIBRATION_TIME,
         'acquisition_mode':        ACQUISITION_MODE,
-        'ac_removal_enabled':      AC_REMOVAL_ENABLED,
-        'ac_removal_fs':           AC_REMOVAL_FS,
-        'ac_removal_cutoff':       AC_REMOVAL_CUTOFF,
-        'ac_removal_order':        AC_REMOVAL_ORDER,
         'plot_downsample_enabled': PLOT_DOWNSAMPLE_ENABLED,
         'plot_max_points':         PLOT_MAX_POINTS,
+        # AC bias removal
+        'ac_removal_enabled':      AC_REMOVAL_ENABLED,
+        'ac_removal_cutoff':       AC_REMOVAL_CUTOFF,
+        'ac_removal_order':        AC_REMOVAL_ORDER,
     }
 
     print("=" * 60)
@@ -353,11 +460,8 @@ if __name__ == "__main__":
         print(f"  Gain:   {MANUAL_GAIN_FACTOR}x")
         print(f"  Offset: {MANUAL_DC_OFFSET}V")
     print(f"Acq. mode:        {ACQUISITION_MODE}")
-    if AC_REMOVAL_ENABLED:
-        print(f"AC bias removal:  ON  fs={AC_REMOVAL_FS} Hz  "
-              f"cutoff={AC_REMOVAL_CUTOFF} Hz  order={AC_REMOVAL_ORDER}")
-    else:
-        print(f"AC bias removal:  OFF")
+    print(f"AC bias removal:  {'ON -- cutoff ' + str(AC_REMOVAL_CUTOFF) + ' Hz, order ' + str(AC_REMOVAL_ORDER) if AC_REMOVAL_ENABLED else 'OFF'}")
+    print(f"Plot DS:          {'ON -- max ' + str(PLOT_MAX_POINTS) + ' pts' if PLOT_DOWNSAMPLE_ENABLED else 'OFF'}")
     print("=" * 60)
 
     rp.run(run_params)
