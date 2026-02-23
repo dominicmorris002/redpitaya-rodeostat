@@ -9,8 +9,6 @@ Phase is in degrees!
 I recommend CONTINUOUS Mode for good Data.
 
 Have a great day :)
-
-Dominic Morris 2/19/2026
 """
 
 from datetime import datetime
@@ -19,8 +17,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 import os
 from pyrpl import Pyrpl
-from scipy.signal import find_peaks, savgol_filter
-from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks
 
 # ============================================================
 # MEASUREMENT PARAMETERS
@@ -68,21 +65,7 @@ ACQUISITION_MODE = 'CONTINUOUS'
 PLOT_DOWNSAMPLE_ENABLED = True
 PLOT_MAX_POINTS = 50_000
 
-# ============================================================
-# SIGNAL SHARPENING
-# ============================================================
 
-# Methods available:
-#   'unsharp' - Unsharp masking. Subtracts a blurred copy to boost edges.
-#   'savgol'  - Savitzky-Golay 2nd-derivative boost. Better for noisy signals.
-#
-# Strength: 0.0 = no effect, 1.0 = very aggressive.
-
-SHARPENING_ENABLED = False
-SHARPENING_METHOD = 'unsharp'   # 'unsharp' or 'savgol'
-SHARPENING_STRENGTH = 0.5
-SHARPENING_SIGMA = None         # None = auto (capped at 500 samples)
-# ============================================================
 
 START_TIME_FILE = "start_time.txt"
 try:
@@ -105,39 +88,6 @@ def downsample(arrays, n_samples, max_points, enabled=True):
     step = max(1, n_samples // max_points)
     ds = [arr[::step] for arr in arrays]
     return ds, step, len(ds[0])
-
-
-def sharpen_signal(signal, t, filter_bandwidth, method='unsharp',
-                   strength=0.5, smooth_sigma=None):
-
-    if strength == 0 or len(signal) < 5:
-        return signal.copy()
-
-    dt = np.mean(np.diff(t))
-    sample_rate = 1.0 / dt
-
-    if method == 'unsharp':
-        if smooth_sigma is None:
-            raw_sigma = sample_rate / (filter_bandwidth * 4.0)
-            smooth_sigma = min(max(1.0, raw_sigma), 500.0)
-        blurred = gaussian_filter1d(signal.astype(float), sigma=smooth_sigma)
-        return signal + strength * (signal - blurred)
-
-    elif method == 'savgol':
-        window = max(5, int(sample_rate / filter_bandwidth))
-        if window % 2 == 0:
-            window += 1
-        window = min(window, len(signal) - 2)
-        if window < 5:
-            window = 5
-        d2 = savgol_filter(signal, window_length=window, polyorder=3, deriv=2)
-        d2_scale = np.max(np.abs(d2))
-        if d2_scale == 0:
-            return signal.copy()
-        return signal - strength * (d2 / d2_scale) * np.std(signal)
-
-    else:
-        raise ValueError(f"Unknown sharpening method '{method}'. Use 'unsharp' or 'savgol'.")
 
 
 def detect_peaks_and_annotate(ax, t, signal, unit_str, color_peak='red',
@@ -374,6 +324,15 @@ class RedPitayaLockInLogger:
                 cal_time=params.get('calibration_time', 2.0))
 
         self.setup_lockin(params)
+
+        # ── WAIT FOR USER TO TRIGGER ──────────────────────────────────────────
+        print()
+        print("=" * 60)
+        print("AC signal is running. Press ENTER to start measurement.")
+        print("=" * 60)
+        input()
+        # ─────────────────────────────────────────────────────────────────────
+
         print("Allowing lock-in to settle...")
         time.sleep(0.5)
 
@@ -439,33 +398,6 @@ class RedPitayaLockInLogger:
         ds_sample_rate = n_plot / actual_duration
         print(f"Downsampled sample rate: {ds_sample_rate:.1f} Hz")
 
-        # ── Sharpen the downsampled signals ───────────────────────────────────
-        # Results shown in Row 5 of the plot (raw shown faint in same row).
-        sharp_on  = params.get('sharpening_enabled', False)
-        sharp_mth = params.get('sharpening_method', 'unsharp')
-        sharp_str = params.get('sharpening_strength', 0.5)
-        sharp_sig = params.get('sharpening_sigma', None)
-
-        if sharp_on:
-            if sharp_sig is None and sharp_mth == 'unsharp':
-                raw_sigma = ds_sample_rate / (filter_bw * 4.0)
-                actual_sigma = min(max(1.0, raw_sigma), 500.0)
-                print(f"\nSharpening ({sharp_mth}, strength={sharp_str}):")
-                print(f"  Auto sigma: {raw_sigma:.1f} samples -> capped at {actual_sigma:.1f}")
-            else:
-                print(f"\nSharpening ({sharp_mth}, strength={sharp_str}):")
-
-            R_sp     = sharpen_signal(R_p,     t_p, filter_bw, sharp_mth, sharp_str, sharp_sig)
-            Theta_sp = sharpen_signal(Theta_p, t_p, filter_bw, sharp_mth, sharp_str, sharp_sig)
-            X_sp     = sharpen_signal(X_p,     t_p, filter_bw, sharp_mth, sharp_str, sharp_sig)
-            Y_sp     = sharpen_signal(Y_p,     t_p, filter_bw, sharp_mth, sharp_str, sharp_sig)
-            print("  Done")
-        else:
-            # When sharpening is off, row 5 just mirrors row 4
-            R_sp = R_p.copy(); Theta_sp = Theta_p.copy()
-            X_sp = X_p.copy(); Y_sp = Y_p.copy()
-            print("\nSharpening: DISABLED")
-
         # ── Grab raw scope signals for Row 1 ──────────────────────────────────
         print("\nCapturing scope snapshot...")
         self.scope.input1 = 'out1'
@@ -525,9 +457,6 @@ class RedPitayaLockInLogger:
         print(f"Mean X:     {np.mean(all_X):.6f} +/- {np.std(all_X):.6f} V")
         print(f"Mean Y:     {np.mean(all_Y):.6f} +/- {np.std(all_Y):.6f} V")
         print(f"Mean Theta: {np.mean(Theta):.3f} +/- {np.std(Theta):.3f} deg")
-        if sharp_on:
-            print(f"\nSharpened R:     {np.mean(R_sp):.6f} +/- {np.std(R_sp):.6f} V")
-            print(f"Sharpened Theta: {np.mean(Theta_sp):.3f} +/- {np.std(Theta_sp):.3f} deg")
         print("=" * 60)
 
         # ── Zoom window ───────────────────────────────────────────────────────
@@ -538,42 +467,36 @@ class RedPitayaLockInLogger:
 
         t_z   = t_p[zs:ze];   R_z   = R_p[zs:ze];   Th_z  = Theta_p[zs:ze]
         X_z   = X_p[zs:ze];   Y_z   = Y_p[zs:ze]
-        R_zs  = R_sp[zs:ze];  Th_zs = Theta_sp[zs:ze]
-        X_zs  = X_sp[zs:ze];  Y_zs  = Y_sp[zs:ze]
 
-        ds_note     = f' [1:{ds_step} for plot]' if ds_step > 1 else ''
-        sharp_label = (f'Sharpened ({sharp_mth}, s={sharp_str})' if sharp_on else 'No sharpening')
-        z_raw_lbl   = f'Zoomed {t_z[0]:.1f}-{t_z[-1]:.1f}s ({ZOOM_FRAC*100:.0f}%) RAW{ds_note}'
-        z_shp_lbl   = f'Zoomed {t_z[0]:.1f}-{t_z[-1]:.1f}s ({ZOOM_FRAC*100:.0f}%) {sharp_label}'
+        ds_note   = f' [1:{ds_step} for plot]' if ds_step > 1 else ''
+        z_raw_lbl = f'Zoomed {t_z[0]:.1f}-{t_z[-1]:.1f}s ({ZOOM_FRAC*100:.0f}%) RAW{ds_note}'
 
         # ── Plot ──────────────────────────────────────────────────────────────
-        # Layout: 5 rows x 3 cols
+        # Layout: 4 rows x 3 cols
         #   Row 1: Reference signal | Input signal | FFT
         #   Row 2: X (full)        | Y (full)      | IQ plot (full)
         #   Row 3: R (full)        | Theta (full)  | Phase vs Magnitude
-        #   Row 4: R zoomed RAW    | Theta zoomed RAW    | IQ zoomed RAW
-        #   Row 5: R zoomed SHARP  | Theta zoomed SHARP  | IQ zoomed SHARP
-
+        #   Row 4: R zoomed        | Theta zoomed  | IQ zoomed
 
         print("\nRendering plots...")
-        fig = plt.figure(figsize=(18, 22))
+        fig = plt.figure(figsize=(18, 18))
 
         def _margin(arr):
             return 5 * max(np.max(arr) - np.min(arr), 1e-12)
 
         # Row 1
-        ax1 = plt.subplot(5, 3, 1)
+        ax1 = plt.subplot(4, 3, 1)
         n_raw = min(int(5 * self.nominal_sample_rate / self.ref_freq), len(out1_raw))
         ax1.plot(t_raw[:n_raw] * 1000, out1_raw[:n_raw], 'b-', lw=1)
         ax1.set(xlabel='Time (ms)', ylabel='OUT1 (V)', title=f'Reference @ {self.ref_freq} Hz')
         ax1.grid(True)
 
-        ax2 = plt.subplot(5, 3, 2)
+        ax2 = plt.subplot(4, 3, 2)
         ax2.plot(t_raw[:n_raw] * 1000, in1_raw[:n_raw], 'r-', lw=1)
         ax2.set(xlabel='Time (ms)', ylabel='IN1 (V, corrected)', title=f'Input -- {self.input_mode}')
         ax2.grid(True)
 
-        ax3 = plt.subplot(5, 3, 3)
+        ax3 = plt.subplot(4, 3, 3)
         ax3.semilogy(freqs, psd, label='Lock-in PSD')
         if power_spur > 0.01 * dc_power:
             ax3.axvline(freq_spur, color='orange', ls='--', alpha=0.7,
@@ -582,28 +505,28 @@ class RedPitayaLockInLogger:
         ax3.legend(); ax3.grid(True)
 
         # Row 2
-        ax4 = plt.subplot(5, 3, 4)
+        ax4 = plt.subplot(4, 3, 4)
         ax4.plot(t_p, X_p, 'b-', lw=0.5)
         ax4.axhline(np.mean(all_X), color='r', ls='--', label=f'Mean: {np.mean(all_X):.6f}V')
         ax4.set(xlabel='Time (s)', ylabel='X (V)', title=f'In-phase (X){ds_note}')
         ax4.legend(); ax4.grid(True); ax4.set_xlim(t_p[0], t_p[-1])
         m = _margin(X_p); ax4.set_ylim(np.min(X_p)-m, np.max(X_p)+m)
 
-        ax5 = plt.subplot(5, 3, 5)
+        ax5 = plt.subplot(4, 3, 5)
         ax5.plot(t_p, Y_p, 'r-', lw=0.5)
         ax5.axhline(np.mean(all_Y), color='b', ls='--', label=f'Mean: {np.mean(all_Y):.6f}V')
         ax5.set(xlabel='Time (s)', ylabel='Y (V)', title=f'Quadrature (Y){ds_note}')
         ax5.legend(); ax5.grid(True); ax5.set_xlim(t_p[0], t_p[-1])
         m = _margin(Y_p); ax5.set_ylim(np.min(Y_p)-m, np.max(Y_p)+m)
 
-        ax6 = plt.subplot(5, 3, 6)
+        ax6 = plt.subplot(4, 3, 6)
         ax6.plot(X_p, Y_p, 'g.', ms=1, alpha=0.5)
         ax6.plot(np.mean(all_X), np.mean(all_Y), 'r+', ms=15, mew=2, label='Mean')
         ax6.set(xlabel='X (V)', ylabel='Y (V)', title=f'IQ Plot{ds_note}')
         ax6.legend(); ax6.grid(True); ax6.axis('equal')
 
         # Row 3
-        ax7 = plt.subplot(5, 3, 7)
+        ax7 = plt.subplot(4, 3, 7)
         R_p_uA = R_p * 1e6
         ax7.plot(t_p, R_p_uA, 'm-', lw=0.5)
         ax7.axhline(np.mean(R)*1e6, color='b', ls='--', label=f'Mean: {np.mean(R)*1e6:.4f} uA')
@@ -613,7 +536,7 @@ class RedPitayaLockInLogger:
         ax7.axvspan(t_z[0], t_z[-1], color='yellow', alpha=0.25, label=f'Zoom ({ZOOM_FRAC*100:.0f}%)')
         ax7.legend(fontsize=7)
 
-        ax8 = plt.subplot(5, 3, 8)
+        ax8 = plt.subplot(4, 3, 8)
         ax8.plot(t_p, Theta_p, 'c-', lw=0.5)
         ax8.axhline(np.mean(Theta), color='r', ls='--', label=f'Mean: {np.mean(Theta):.3f} deg')
         ax8.set(xlabel='Time (s)', ylabel='Theta (deg)', title=f'Phase (Theta) -- Full{ds_note}')
@@ -622,13 +545,13 @@ class RedPitayaLockInLogger:
         ax8.axvspan(t_z[0], t_z[-1], color='yellow', alpha=0.25, label=f'Zoom ({ZOOM_FRAC*100:.0f}%)')
         ax8.legend(fontsize=7)
 
-        ax9 = plt.subplot(5, 3, 9)
+        ax9 = plt.subplot(4, 3, 9)
         ax9.plot(Theta_p, R_p, 'g.', ms=1, alpha=0.5)
         ax9.plot(np.mean(Theta), np.mean(R), 'r+', ms=15, mew=2, label='Mean')
         ax9.set(xlabel='Theta (deg)', ylabel='R (V)', title='Phase vs Magnitude')
         ax9.legend(); ax9.grid(True)
 
-        # Row 4: Zoomed RAW
+        # Row 4: Zoomed
         def _zoom_plot(ax, t_z, sig, scale, ylabel, title, color, unit_str, lp):
             s = sig * scale
             mn, sd = np.mean(s), np.std(s)
@@ -642,45 +565,16 @@ class RedPitayaLockInLogger:
                                       min_prominence_frac=0.15, scale=scale, label_prefix=lp)
             ax.legend(fontsize=7, loc='upper right')
 
-        _zoom_plot(plt.subplot(5,3,10), t_z, R_z,  1e6, 'R (uA)',
-                   f'R -- Zoomed RAW\n{z_raw_lbl}',      'm', ' uA',  'R: ')
-        _zoom_plot(plt.subplot(5,3,11), t_z, Th_z, 1.0, 'Theta (deg)',
-                   f'Theta -- Zoomed RAW\n{z_raw_lbl}',  'c', ' deg', 'Th: ')
+        _zoom_plot(plt.subplot(4,3,10), t_z, R_z,  1e6, 'R (uA)',
+                   f'R -- Zoomed\n{z_raw_lbl}',      'm', ' uA',  'R: ')
+        _zoom_plot(plt.subplot(4,3,11), t_z, Th_z, 1.0, 'Theta (deg)',
+                   f'Theta -- Zoomed\n{z_raw_lbl}',  'c', ' deg', 'Th: ')
 
-        ax12 = plt.subplot(5, 3, 12)
+        ax12 = plt.subplot(4, 3, 12)
         ax12.plot(X_z, Y_z, 'g.', ms=2, alpha=0.6)
         ax12.plot(np.mean(X_z), np.mean(Y_z), 'r+', ms=15, mew=2, label='Mean')
-        ax12.set(xlabel='X (V)', ylabel='Y (V)', title=f'IQ -- Zoomed RAW\n{z_raw_lbl}')
+        ax12.set(xlabel='X (V)', ylabel='Y (V)', title=f'IQ -- Zoomed\n{z_raw_lbl}')
         ax12.legend(fontsize=7); ax12.grid(True); ax12.axis('equal')
-
-        # Row 5: Zoomed SHARPENED (raw shown as faint dashed overlay)
-        def _zoom_sharp_plot(ax, t_z, sig_s, sig_r, scale, ylabel, title,
-                              color_s, unit_str, lp):
-            ss = sig_s * scale
-            sr = sig_r * scale
-            mn, sd = np.mean(ss), np.std(ss)
-            ax.plot(t_z, ss, color=color_s, lw=1.0, label='Sharpened')
-            ax.plot(t_z, sr, color=color_s, lw=0.5, alpha=0.35, ls='--', label='Raw')
-            ax.axhline(mn, color='b', ls='--', label=f'Mean: {mn:.2f}\nStd: {sd:.2f}')
-            ax.fill_between(t_z, mn-sd, mn+sd, alpha=0.15, color='blue', label='+/-1 sigma')
-            ax.set(xlabel='Time (s)', ylabel=ylabel, title=title)
-            ax.grid(True); ax.set_xlim(t_z[0], t_z[-1])
-            detect_peaks_and_annotate(ax, t_z, sig_s, unit_str=unit_str,
-                                      color_peak='darkred', color_trough='navy',
-                                      min_prominence_frac=0.15, scale=scale, label_prefix=lp)
-            ax.legend(fontsize=7, loc='upper right')
-
-        _zoom_sharp_plot(plt.subplot(5,3,13), t_z, R_zs,  R_z,  1e6, 'R (uA)',
-                         f'R -- Sharpened\n{z_shp_lbl}',     'darkmagenta', ' uA',  'R: ')
-        _zoom_sharp_plot(plt.subplot(5,3,14), t_z, Th_zs, Th_z, 1.0, 'Theta (deg)',
-                         f'Theta -- Sharpened\n{z_shp_lbl}', 'darkcyan',    ' deg', 'Th: ')
-
-        ax15 = plt.subplot(5, 3, 15)
-        ax15.plot(X_z,  Y_z,  '.', color='lightgreen', ms=2, alpha=0.4, label='Raw')
-        ax15.plot(X_zs, Y_zs, 'g.', ms=2, alpha=0.7, label='Sharpened')
-        ax15.plot(np.mean(X_zs), np.mean(Y_zs), 'r+', ms=15, mew=2, label='Mean')
-        ax15.set(xlabel='X (V)', ylabel='Y (V)', title=f'IQ -- Sharpened\n{z_shp_lbl}')
-        ax15.legend(fontsize=7); ax15.grid(True); ax15.axis('equal')
 
         plt.tight_layout()
 
@@ -706,10 +600,6 @@ class RedPitayaLockInLogger:
                 f.write(f"# Duration: {actual_duration:.3f} s  Samples: {n_samples}\n")
                 f.write(f"# Sample rate: {n_samples/actual_duration:.2f} Hz\n")
                 f.write(f"# Acquisition: {acq_mode}\n")
-                f.write(f"# Sharpening: {sharp_on}"
-                        + (f"  method={sharp_mth}  strength={sharp_str}  "
-                           f"(applied to {ds_step}x downsampled data for plots)\n"
-                           if sharp_on else "\n"))
                 f.write(f"# Plot downsample step: {ds_step}x  (CSV is full resolution)\n")
                 f.write("Index,Time(s),R(V),Theta(deg),X(V),Y(V)\n")
                 np.savetxt(f, data, delimiter=",", fmt='%.10f')
@@ -743,10 +633,6 @@ if __name__ == '__main__':
         'auto_calibrate':          AUTO_CALIBRATE,
         'calibration_time':        CALIBRATION_TIME,
         'acquisition_mode':        ACQUISITION_MODE,
-        'sharpening_enabled':      SHARPENING_ENABLED,
-        'sharpening_method':       SHARPENING_METHOD,
-        'sharpening_strength':     SHARPENING_STRENGTH,
-        'sharpening_sigma':        SHARPENING_SIGMA,
         'plot_downsample_enabled': PLOT_DOWNSAMPLE_ENABLED,
         'plot_max_points':         PLOT_MAX_POINTS,
     }
@@ -764,7 +650,6 @@ if __name__ == '__main__':
         print(f"  Gain:   {MANUAL_GAIN_FACTOR}x")
         print(f"  Offset: {MANUAL_DC_OFFSET}V")
     print(f"Acq. mode:    {ACQUISITION_MODE}")
-    print(f"Sharpening:   {'ON -- ' + SHARPENING_METHOD + ' @ ' + str(SHARPENING_STRENGTH) if SHARPENING_ENABLED else 'OFF'}")
     print(f"Plot DS:      {'ON -- max ' + str(PLOT_MAX_POINTS) + ' pts/signal' if PLOT_DOWNSAMPLE_ENABLED else 'OFF'}")
     print("=" * 60)
 
