@@ -23,7 +23,7 @@ from scipy.signal import butter, filtfilt
 # MEASUREMENT PARAMETERS
 # ============================================================
 MEASUREMENT_TIME = 12.0  # seconds
-DECIMATION = 1024
+DECIMATION = 8
 AVERAGING_WINDOW = 1
 
 # INPUT MODE: 'AUTO', 'LV', 'HV', or 'MANUAL'
@@ -58,7 +58,7 @@ ACQUISITION_MODE = 'CONTINUOUS'
 # Lower it (e.g. 10 Hz) if your ramp is very slow and you want
 # cleaner suppression; raise it (e.g. 100 Hz) if the ramp is fast.
 AC_REMOVAL_ENABLED = True
-AC_REMOVAL_CUTOFF  = 5      # Hz -- MUST be well below your AC frequency (500 Hz)
+AC_REMOVAL_CUTOFF  = 6      # Hz -- MUST be well below your AC frequency (500 Hz)
 AC_REMOVAL_ORDER   = 4       # Butterworth order (4 is a good default)
 # ============================================================
 
