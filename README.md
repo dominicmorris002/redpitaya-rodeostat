@@ -34,8 +34,15 @@ Features
 
 Results
 
+
+
+
+the Rodeostat was found to be highly accurate and produced the same data as a Autolab Potentiostat for our Experiments
+
+
 <img width="1437" height="842" alt="image" src="https://github.com/user-attachments/assets/b12a8504-32d9-435f-b3cd-a5cc98faf833" />
-<img width="1437" height="842" alt="image" src="https://github.com/user-attachments/assets/b12a8504-32d9-435f-b3cd-a5cc98faf833" />
+
+Make sure to calibrate the devices to your potentiostat, the Redpitaya was found to be highly accurate and produced the same data as a Signal Recovery 7280 DSP Lock In Amplifier
 
 
 ---------------------------------------------------------------------------------------------------
