@@ -43,6 +43,20 @@ ACQUISITION_MODE = 'CONTINUOUS'
 # ============================================================
 # AC BIAS REMOVAL
 # ============================================================
+# The signal contains a slow DC ramp + a 500 Hz AC wave (±0.2 V).
+# To recover just the DC ramp we low-pass filter WELL BELOW the
+# AC frequency.  Rule of thumb: cutoff <= AC_freq / 10.
+#
+# With DECIMATION=8 the sample rate is 125e6/8 = 15.625 MHz,
+# so Nyquist is ~7.8 MHz -- any cutoff well below 500 Hz is safe.
+#
+# AC_REMOVAL_CUTOFF must be:
+#   (a) well BELOW  your AC signal frequency  (500 Hz) -- to reject it
+#   (b) well ABOVE  your DC ramp bandwidth    (< 1 Hz) -- to keep it
+#
+# 50 Hz is a good default for a 500 Hz AC signal.
+# Lower it (e.g. 10 Hz) if your ramp is very slow and you want
+# cleaner suppression; raise it (e.g. 100 Hz) if the ramp is fast.
 AC_REMOVAL_ENABLED = True
 AC_REMOVAL_CUTOFF  = 6      # Hz -- MUST be well below your AC frequency (500 Hz)
 AC_REMOVAL_ORDER   = 4       # Butterworth order (4 is a good default)
@@ -81,6 +95,23 @@ def downsample(arrays, n_samples, max_points, enabled=True):
 
 
 def remove_ac_bias(signal, fs, cutoff, order=4):
+    """
+    Remove AC bias using a zero-phase Butterworth low-pass filter.
+
+    Parameters
+    ----------
+    signal  : 1-D numpy array  -- the raw voltage trace
+    fs      : float            -- actual sample rate in Hz (125e6 / DECIMATION)
+    cutoff  : float            -- low-pass cutoff in Hz
+                                  MUST be well below your AC frequency and
+                                  well above your DC ramp bandwidth.
+                                  For a 500 Hz AC signal use ~50 Hz.
+    order   : int              -- Butterworth filter order (default 4)
+
+    Returns
+    -------
+    filtered : 1-D numpy array -- DC-only signal with AC component removed
+    """
     nyq = fs / 2.0
     if cutoff >= nyq:
         raise ValueError(
@@ -89,7 +120,10 @@ def remove_ac_bias(signal, fs, cutoff, order=4):
         )
     if cutoff <= 0:
         raise ValueError("AC_REMOVAL_CUTOFF must be greater than 0 Hz.")
+
     b, a = butter(order, cutoff / nyq, btype='low')
+    # filtfilt applies the filter twice (forward + backward) so phase is zero
+    # (no time-shift in the recovered DC ramp)
     return filtfilt(b, a, signal)
 
 
@@ -110,6 +144,7 @@ class RedPitayaDCLogger:
         self.buffers = []
         self.capture_times = []
 
+        # Setup input gain scaling and DC offset
         self.input_gain_factor = manual_gain
         self.input_dc_offset = manual_offset
         self.input_mode_setting = input_mode.upper()
@@ -134,6 +169,7 @@ class RedPitayaDCLogger:
             self.input_mode = "AUTO (will calibrate)"
             print("Input mode: AUTO - will auto-detect")
 
+        # Scope setup (matches lock-in style)
         self.scope.input1 = 'in1'
         self.scope.input2 = 'in1'
         self.scope.decimation = DECIMATION
@@ -250,8 +286,10 @@ class RedPitayaDCLogger:
                 cal_time=params.get('calibration_time', 2.0)
             )
 
+        # ── Wait for Enter before starting measurement ────────────────────────
         input("\nPress Enter to start measurement...")
         print("")
+        # ─────────────────────────────────────────────────────────────────────
 
         print("\nAllowing scope to settle...")
         time.sleep(0.3)
@@ -277,20 +315,20 @@ class RedPitayaDCLogger:
         capture_count = len(self.buffers)
         print(f"Captured {capture_count} buffers")
 
+        # ── Concatenate and correct ───────────────────────────────────────────
         raw = np.concatenate(self.buffers)
         corrected = (raw - self.input_dc_offset) * self.input_gain_factor
-
-        # FIX 1: replace NaN/Inf so nothing downstream crashes
-        nan_count = np.sum(~np.isfinite(corrected))
-        if nan_count > 0:
-            print(f"  WARNING: {nan_count:,} NaN/Inf samples replaced with 0")
-            corrected = np.where(np.isfinite(corrected), corrected, 0.0)
 
         w = params.get('averaging_window', 1)
         if w > 1:
             corrected = np.convolve(corrected, np.ones(w) / w, mode='valid')
             print(f"Applied {w}-sample moving average")
 
+        # ── AC Bias Removal ───────────────────────────────────────────────────
+        # Strategy: low-pass filter retains only the slow DC ramp.
+        # The cutoff MUST be well below the AC signal frequency (500 Hz).
+        # A cutoff of 50 Hz gives ~80 dB of attenuation at 500 Hz with a
+        # 4th-order Butterworth, cleanly stripping the ±0.2 V AC component.
         ac_enabled = params.get('ac_removal_enabled', False)
         ac_cutoff  = params.get('ac_removal_cutoff',  50)
         ac_order   = params.get('ac_removal_order',   4)
@@ -305,7 +343,7 @@ class RedPitayaDCLogger:
             print(f"  Attenuation @ 500 Hz: ~{20*ac_order*np.log10(500/ac_cutoff):.0f} dB")
             try:
                 corrected_filtered = remove_ac_bias(corrected, fs, ac_cutoff, ac_order)
-                ac_removed = corrected - corrected_filtered
+                ac_removed = corrected - corrected_filtered  # the stripped AC component
                 ac_rms  = np.sqrt(np.mean(ac_removed ** 2))
                 ac_peak = (np.max(ac_removed) - np.min(ac_removed)) / 2
                 print(f"  AC component RMS:  {ac_rms*1000:.4f} mV  peak: {ac_peak*1000:.4f} mV")
@@ -315,12 +353,14 @@ class RedPitayaDCLogger:
             except ValueError as e:
                 print(f"  WARNING: AC bias removal skipped -- {e}")
                 ac_enabled = False
+        # ─────────────────────────────────────────────────────────────────────
 
         n_samples = len(corrected)
         sample_index = np.arange(n_samples)
         t = sample_index / (n_samples / actual_duration)
         effective_sample_rate = n_samples / actual_duration
 
+        # Buffer timing diagnostics
         samples_per_buffer = n_samples / capture_count
         data_time_per_buffer = samples_per_buffer / self.nominal_sample_rate
         buffer_spacing = actual_duration / capture_count
@@ -347,6 +387,7 @@ class RedPitayaDCLogger:
               f"({dead_time * capture_count / actual_duration * 100:.1f}%)")
         print("=" * 60)
 
+        # ── Downsample for plotting ───────────────────────────────────────────
         ds_on  = params.get('plot_downsample_enabled', True)
         ds_max = params.get('plot_max_points', 50_000)
 
@@ -362,22 +403,15 @@ class RedPitayaDCLogger:
 
         ds_note = f' [1:{ds_step} for plot]' if ds_step > 1 else ''
 
-        mean_v = float(np.mean(corrected))
-        std_v  = float(np.std(corrected))
-
+        # ── Plot ─────────────────────────────────────────────────────────────
         plt.figure(figsize=(14, 6))
         plt.plot(t_p, v_p, linewidth=0.8, label=f'DC Ramp{ds_note}{ac_label}')
-        plt.axhline(mean_v, color='r', linestyle='--',
-                    label=f"Mean {mean_v:.6f} V")
-
-        # FIX 2: cast to plain floats so fill_between never hits masked-array bug
-        if np.isfinite(mean_v) and np.isfinite(std_v):
-            plt.fill_between(np.asarray(t_p, dtype=float),
-                             mean_v - std_v,
-                             mean_v + std_v,
-                             alpha=0.15, color='blue',
-                             label=f'+/-1σ ({std_v:.6f} V)')
-
+        plt.axhline(np.mean(corrected), color='r', linestyle='--',
+                    label=f"Mean {np.mean(corrected):.6f} V")
+        plt.fill_between(t_p,
+                         np.mean(corrected) - np.std(corrected),
+                         np.mean(corrected) + np.std(corrected),
+                         alpha=0.15, color='blue', label=f'+/-1σ ({np.std(corrected):.6f} V)')
         plt.xlabel("Time (s)")
         plt.ylabel("Voltage (V)")
         plt.title(f"DC Voltage vs Time - {self.input_mode}\n"
@@ -387,6 +421,7 @@ class RedPitayaDCLogger:
         plt.grid(True)
         plt.tight_layout()
 
+        # ── Save ─────────────────────────────────────────────────────────────
         if params['save_file']:
             os.makedirs(self.output_dir, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
