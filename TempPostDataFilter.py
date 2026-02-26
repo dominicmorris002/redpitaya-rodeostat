@@ -17,7 +17,6 @@ Usage: paste plot_accv_cycle_averaged() call at the bottom of startboth.py
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 from scipy.signal import find_peaks
 import os
@@ -27,12 +26,20 @@ from datetime import datetime
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG  (mirrors startboth.py settings)
 # ─────────────────────────────────────────────────────────────────────────────
-OUTPUT_DIRECTORY  = 'test_data'
-N_GRID_POINTS     = 500      # voltage grid resolution for interpolation
-MIN_CYCLES        = 2        # need at least this many cycles to average
-SHOW_INDIVIDUAL   = True     # plot individual cycles faintly behind average
-INDIVIDUAL_ALPHA  = 0.12     # transparency for individual cycle traces
+
+# *** SET YOUR CSV PATH HERE -- change this to your combined_results CSV ***
+CSV_PATH = r"C:\Users\Owner\Downloads\combined_results_20260223_182526.csv"
+
+# Output PNG is saved next to the CSV automatically (no need to change this)
+OUTPUT_DIRECTORY  = None      # None = auto: saves PNG in same folder as CSV
+N_GRID_POINTS     = 500       # voltage grid resolution for interpolation
+MIN_CYCLES        = 2         # need at least this many cycles to average
+SHOW_INDIVIDUAL   = False     # plot individual cycles faintly behind average
+INDIVIDUAL_ALPHA  = 0.12      # transparency for individual cycle traces
 SAVE_PNG          = True
+SMOOTH_WINDOW     = 51        # Savitzky-Golay window for mean line smoothing
+                              # must be odd; bigger = smoother (try 21-51)
+                              # set to 0 to disable smoothing
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -134,15 +141,27 @@ def cycle_average(dc_v, signal, cycles, v_grid, sweep='up'):
     if not traces:
         return [], np.full(len(v_grid), np.nan), np.full(len(v_grid), np.nan)
 
-    stack   = np.vstack(traces)                     # shape (n_cycles, n_grid)
-    mean_tr = np.nanmean(stack, axis=0)
-    std_tr  = np.nanstd(stack,  axis=0)
+    stack   = np.vstack(traces)
+    # Only average columns that have at least one real value
+    all_nan = np.all(np.isnan(stack), axis=0)
+    mean_tr = np.where(all_nan, np.nan, np.nanmean(stack, axis=0))
+    std_tr  = np.where(all_nan, np.nan, np.nanstd(stack,  axis=0))
+
+    # Smooth the mean trace with Savitzky-Golay to remove residual jitter
+    # while preserving peak shape
+    from scipy.signal import savgol_filter
+    valid = ~np.isnan(mean_tr)
+    if SMOOTH_WINDOW and valid.sum() > SMOOTH_WINDOW:
+        smoothed = mean_tr.copy()
+        smoothed[valid] = savgol_filter(mean_tr[valid], window_length=SMOOTH_WINDOW, polyorder=3)
+        mean_tr = smoothed
     return traces, mean_tr, std_tr
 
 
 def plot_accv_cycle_averaged(dc_v, li_R, li_Theta, theta_unit='deg',
-                              timestamp_str=None, output_dir=OUTPUT_DIRECTORY,
-                              ds_note='', n_samples=None, n_ds=None):
+                              timestamp_str=None, output_dir=None,
+                              ds_note='', n_samples=None, n_ds=None,
+                              csv_path=None):
     """
     Main entry point.  Call this with the merged, (optionally downsampled)
     arrays that startboth.py already builds.
@@ -159,6 +178,10 @@ def plot_accv_cycle_averaged(dc_v, li_R, li_Theta, theta_unit='deg',
     n_samples   : int        raw sample count for title
     n_ds        : int        plotted sample count for title
     """
+
+    # Resolve output directory: use folder of CSV if not specified
+    if output_dir is None:
+        output_dir = os.path.dirname(os.path.abspath(csv_path)) if csv_path else 'test_data'
 
     print("\n" + "=" * 60)
     print("CYCLE AVERAGING")
@@ -307,40 +330,53 @@ def plot_accv_cycle_averaged(dc_v, li_R, li_Theta, theta_unit='deg',
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STANDALONE: run on the most recent combined_results CSV
+# STANDALONE: run directly -- uses CSV_PATH set at the top of this file
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     import sys
 
-    try:
-        if len(sys.argv) > 1:
-            csv_path = sys.argv[1]
-        else:
+    # Command-line argument overrides the CSV_PATH config above
+    if len(sys.argv) > 1:
+        csv_path = sys.argv[1]
+    elif CSV_PATH:
+        csv_path = CSV_PATH
+    else:
+        # Fallback: find most recent combined_results CSV in test_data/
+        try:
             csv_path = max(
-                glob.glob(os.path.join(OUTPUT_DIRECTORY, 'combined_results_*.csv')),
+                glob.glob(os.path.join('test_data', 'combined_results_*.csv')),
                 key=os.path.getctime)
-        print(f"Loading: {csv_path}")
-    except ValueError:
-        print(f"No combined_results_*.csv found in '{OUTPUT_DIRECTORY}/'")
-        print("Usage:  python accv_cycle_average.py [path/to/combined_results_*.csv]")
+        except ValueError:
+            print("No CSV found. Set CSV_PATH at the top of this file.")
+            sys.exit(1)
+
+    print(f"Loading: {csv_path}")
+
+    if not os.path.exists(csv_path):
+        print(f"ERROR: File not found: {csv_path}")
+        print("Check that CSV_PATH at the top of this file is correct.")
         sys.exit(1)
 
     df = pd.read_csv(csv_path)
+    print(f"Loaded {len(df):,} rows. Columns: {list(df.columns)}")
 
     dc_v     = df['DC_Voltage'].values
     li_R     = df['R'].values
     li_Theta = df['Theta'].values
     n_ds     = len(df)
-
-    # Try to infer raw sample count from filename or just use plotted count
-    n_samples = n_ds  # unknown without the raw CSV; close enough for the title
+    n_samples = n_ds
 
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    # Output PNG saves next to the CSV (OUTPUT_DIRECTORY=None triggers this)
+    out_dir = OUTPUT_DIRECTORY if OUTPUT_DIRECTORY else None
+
     fig = plot_accv_cycle_averaged(
         dc_v, li_R, li_Theta,
         theta_unit='deg',
         timestamp_str=ts,
-        output_dir=OUTPUT_DIRECTORY,
+        output_dir=out_dir,
+        csv_path=csv_path,
         ds_note='',
         n_samples=n_samples,
         n_ds=n_ds)
