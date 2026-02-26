@@ -32,7 +32,9 @@ START_TIME_FILE  = "start_time.txt"
 # ============================================================
 # Individual CSVs are always saved at full resolution by each script.
 # This only affects the merged combined_results CSV and the ACCV PNG.
-COMBINED_MAX_POINTS = 10_000
+# Higher = better cycle averaging resolution (more points per cycle).
+# 100_000 gives ~10k pts/cycle for a 10-cycle experiment -- recommended.
+COMBINED_MAX_POINTS = 100_000
 # ============================================================
 
 print("=" * 60)
@@ -193,29 +195,42 @@ ax_DC_t.set_ylabel('DC Potential (V)', fontsize=12, fontweight='bold')
 ax_DC_t.set_title(f'DC vs Time{ds_note}', fontsize=13, fontweight='bold')
 ax_DC_t.grid(True, alpha=0.3)
 
-# R vs DC (line)
-ax_R_DC.plot(dc_V, li_R, 'b-', linewidth=1.5, alpha=0.8)
+# R vs DC (line) -- colour by sweep direction using gradient
+# Build a simple forward/reverse mask from the DC signal derivative
+_dc_diff = np.gradient(dc_V)
+_fwd = _dc_diff >= 0   # forward = DC rising
+_rev = ~_fwd           # reverse = DC falling
+
+ax_R_DC.plot(dc_V[_fwd], li_R[_fwd], '.', color='#1565C0', markersize=1.5, alpha=0.6, label='Forward (→)')
+ax_R_DC.plot(dc_V[_rev], li_R[_rev], '.', color='#B71C1C', markersize=1.5, alpha=0.6, label='Reverse (←)')
+ax_R_DC.legend(fontsize=9)
 ax_R_DC.set_xlabel('DC Potential (V)',    fontsize=12, fontweight='bold')
 ax_R_DC.set_ylabel('AC Magnitude R (V)', fontsize=12, fontweight='bold')
-ax_R_DC.set_title(f'R vs DC Potential -- Line{ds_note}', fontsize=13, fontweight='bold')
+ax_R_DC.set_title(f'R vs DC Potential -- Raw{ds_note}', fontsize=13, fontweight='bold')
 ax_R_DC.grid(True, alpha=0.3)
 
-# Theta vs DC (line)
-ax_Th_DC.plot(dc_V, li_Theta, 'r-', linewidth=1.5, alpha=0.8)
+# Theta vs DC (line) -- same sweep colouring
+ax_Th_DC.plot(dc_V[_fwd], li_Theta[_fwd], '.', color='#1565C0', markersize=1.5, alpha=0.6, label='Forward (→)')
+ax_Th_DC.plot(dc_V[_rev], li_Theta[_rev], '.', color='#B71C1C', markersize=1.5, alpha=0.6, label='Reverse (←)')
+ax_Th_DC.legend(fontsize=9)
 ax_Th_DC.set_xlabel('DC Potential (V)',            fontsize=12, fontweight='bold')
 ax_Th_DC.set_ylabel(f'Phase Angle ({theta_unit})', fontsize=12, fontweight='bold')
-ax_Th_DC.set_title(f'Theta vs DC Potential -- Line{ds_note}', fontsize=13, fontweight='bold')
+ax_Th_DC.set_title(f'Theta vs DC Potential -- Raw{ds_note}', fontsize=13, fontweight='bold')
 ax_Th_DC.grid(True, alpha=0.3)
 
-# R vs DC (scatter)
-ax_R_DC_sc.scatter(dc_V, li_R, s=3, alpha=0.5, color='b')
+# R vs DC (scatter) -- sweep coloured
+ax_R_DC_sc.scatter(dc_V[_fwd], li_R[_fwd], s=3, alpha=0.5, color='#1565C0', label='Forward (→)')
+ax_R_DC_sc.scatter(dc_V[_rev], li_R[_rev], s=3, alpha=0.5, color='#B71C1C', label='Reverse (←)')
+ax_R_DC_sc.legend(fontsize=9)
 ax_R_DC_sc.set_xlabel('DC Potential (V)',    fontsize=12, fontweight='bold')
 ax_R_DC_sc.set_ylabel('AC Magnitude R (V)', fontsize=12, fontweight='bold')
 ax_R_DC_sc.set_title(f'R vs DC Potential -- Scatter{ds_note}', fontsize=13, fontweight='bold')
 ax_R_DC_sc.grid(True, alpha=0.3)
 
-# Theta vs DC (scatter)
-ax_Th_DC_sc.scatter(dc_V, li_Theta, s=3, alpha=0.5, color='r')
+# Theta vs DC (scatter) -- sweep coloured
+ax_Th_DC_sc.scatter(dc_V[_fwd], li_Theta[_fwd], s=3, alpha=0.5, color='#1565C0', label='Forward (→)')
+ax_Th_DC_sc.scatter(dc_V[_rev], li_Theta[_rev], s=3, alpha=0.5, color='#B71C1C', label='Reverse (←)')
+ax_Th_DC_sc.legend(fontsize=9)
 ax_Th_DC_sc.set_xlabel('DC Potential (V)',            fontsize=12, fontweight='bold')
 ax_Th_DC_sc.set_ylabel(f'Phase Angle ({theta_unit})', fontsize=12, fontweight='bold')
 ax_Th_DC_sc.set_title(f'Theta vs DC Potential -- Scatter{ds_note}', fontsize=13, fontweight='bold')
