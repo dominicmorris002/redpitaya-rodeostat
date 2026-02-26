@@ -28,9 +28,15 @@ There are three main programs:
 Features
 
 - Saves data as **CSV files**
-- Plots using **Matplotlib**
+- Plots using python and HTML for interactive plots
 - Uses a custom **PyRPL controller** with its own `scope.yaml`
 - Easy to read console output
+
+Results
+
+<img width="1437" height="842" alt="image" src="https://github.com/user-attachments/assets/b12a8504-32d9-435f-b3cd-a5cc98faf833" />
+<img width="1437" height="842" alt="image" src="https://github.com/user-attachments/assets/b12a8504-32d9-435f-b3cd-a5cc98faf833" />
+
 
 ---------------------------------------------------------------------------------------------------
 
