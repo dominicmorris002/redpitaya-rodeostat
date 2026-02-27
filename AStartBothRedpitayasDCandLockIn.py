@@ -272,11 +272,11 @@ if RUN_CYCLE_AVERAGING:
     try:
         cycle_avg_script = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            "accv_cycle_avg.py")
+            "postdataplotcreate.py")
 
         if os.path.exists(cycle_avg_script):
             import importlib.util
-            spec = importlib.util.spec_from_file_location("accv_cycle_avg", cycle_avg_script)
+            spec = importlib.util.spec_from_file_location("postdataplotcreate", cycle_avg_script)
             mod  = importlib.util.load_from_spec(spec)
             spec.loader.exec_module(mod)
 
@@ -302,7 +302,7 @@ if RUN_CYCLE_AVERAGING:
                 fig_ca.show()
 
         else:
-            print(f"  (accv_cycle_avg.py not found at {cycle_avg_script})")
+            print(f"  (postdataplotcreate.py not found at {cycle_avg_script})")
             print(f"  Trying to run via subprocess with merged CSV as argument...")
             candidates = glob.glob(os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "*cycle*avg*.py"))
@@ -317,12 +317,12 @@ if RUN_CYCLE_AVERAGING:
                 subprocess.run([python_exe, cycle_avg_script, merged_csv])
             else:
                 print("  Could not find cycle averaging script automatically.")
-                print(f"  Run manually:  python accv_cycle_avg.py  {merged_csv}")
+                print(f"  Run manually:  python postdataplotcreate.py  {merged_csv}")
 
     except Exception as e:
         print(f"  Cycle averaging failed: {e}")
         print(f"  You can still run it manually:")
-        print(f"  python accv_cycle_avg.py  {merged_csv}")
+        print(f"  python postdataplotcreate.py  {merged_csv}")
 
 print("\nCOMPLETE")
 print("=" * 60)
