@@ -179,19 +179,27 @@ ax_R_DC_sc    = axes[2, 0]
 ax_Th_DC_sc   = axes[2, 1]
 axes[2, 2].set_visible(False)
 
-# R vs Time
-ax_R_t.plot(li_time, li_R, 'm-', linewidth=1.0)
+# R vs Time  (with DC ramp overlay on secondary y-axis)
+ax_R_t.plot(li_time, li_R, 'm-', linewidth=1.0, label='R (lock-in)')
 ax_R_t.set_xlabel('Time (s)',           fontsize=12, fontweight='bold')
-ax_R_t.set_ylabel('AC Magnitude R (V)', fontsize=12, fontweight='bold')
-ax_R_t.set_title(f'R vs Time{ds_note}', fontsize=13, fontweight='bold')
+ax_R_t.set_ylabel('AC Magnitude R (V)', fontsize=12, fontweight='bold', color='m')
+ax_R_t.set_title(f'R vs Time  |  DC Ramp overlay{ds_note}', fontsize=13, fontweight='bold')
 ax_R_t.grid(True, alpha=0.3)
+ax_R_t_dc = ax_R_t.twinx()
+ax_R_t_dc.plot(li_time, dc_V, color='#E65100', linewidth=0.8, alpha=0.7, label='DC Ramp')
+ax_R_t_dc.set_ylabel('DC Ramp (V)', fontsize=11, color='#E65100')
+ax_R_t_dc.tick_params(axis='y', labelcolor='#E65100')
 
-# Theta vs Time
-ax_Th_t.plot(li_time, li_Theta, 'c-', linewidth=1.0)
+# Theta vs Time  (with DC ramp overlay on secondary y-axis)
+ax_Th_t.plot(li_time, li_Theta, 'c-', linewidth=1.0, label='Theta')
 ax_Th_t.set_xlabel('Time (s)',                    fontsize=12, fontweight='bold')
-ax_Th_t.set_ylabel(f'Phase Angle ({theta_unit})', fontsize=12, fontweight='bold')
-ax_Th_t.set_title(f'Theta vs Time{ds_note}',      fontsize=13, fontweight='bold')
+ax_Th_t.set_ylabel(f'Phase Angle ({theta_unit})', fontsize=12, fontweight='bold', color='c')
+ax_Th_t.set_title(f'Theta vs Time  |  DC Ramp overlay{ds_note}', fontsize=13, fontweight='bold')
 ax_Th_t.grid(True, alpha=0.3)
+ax_Th_t_dc = ax_Th_t.twinx()
+ax_Th_t_dc.plot(li_time, dc_V, color='#E65100', linewidth=0.8, alpha=0.7, label='DC Ramp')
+ax_Th_t_dc.set_ylabel('DC Ramp (V)', fontsize=11, color='#E65100')
+ax_Th_t_dc.tick_params(axis='y', labelcolor='#E65100')
 
 # DC vs Time
 ax_DC_t.plot(li_time, dc_V, 'g-', linewidth=1.0)
@@ -262,20 +270,16 @@ if RUN_CYCLE_AVERAGING:
     print("LAUNCHING CYCLE AVERAGING ANALYSIS...")
     print("=" * 60)
     try:
-        # Import inline so startboth has no hard dependency on the module
-        # -- works whether file is called accv_cycle_avg.py or similar
         cycle_avg_script = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "accv_cycle_avg.py")
 
         if os.path.exists(cycle_avg_script):
-            # ---- preferred path: import the function directly ----
             import importlib.util
             spec = importlib.util.spec_from_file_location("accv_cycle_avg", cycle_avg_script)
             mod  = importlib.util.load_from_spec(spec)
             spec.loader.exec_module(mod)
 
-            # Read the FULL-RESOLUTION merged CSV (not the downsampled arrays in memory)
             print(f"Loading full merged CSV for cycle analysis: {merged_csv}")
             df_full   = pd.read_csv(merged_csv)
             dc_full   = df_full['DC_Voltage'].values
@@ -298,16 +302,13 @@ if RUN_CYCLE_AVERAGING:
                 fig_ca.show()
 
         else:
-            # ---- fallback: run as subprocess, passing the merged CSV ----
             print(f"  (accv_cycle_avg.py not found at {cycle_avg_script})")
             print(f"  Trying to run via subprocess with merged CSV as argument...")
-            # Search nearby
             candidates = glob.glob(os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "*cycle*avg*.py"))
             if not candidates:
                 candidates = glob.glob(os.path.join(
                     os.path.dirname(os.path.abspath(__file__)), "*accv*.py"))
-                # exclude self
                 candidates = [c for c in candidates
                               if os.path.abspath(c) != os.path.abspath(__file__)]
             if candidates:
