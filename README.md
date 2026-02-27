@@ -2,7 +2,7 @@
 
 Hey! This project is for making an **AC Cyclic Voltammetry (ACCV) setup** using a Rodeostat potentiostat and two Red Pitaya devices.  
 
-It’s all written in Python 3.8 and tested in PyCharm. PyRPL is used in this project but will eventually have a custom modified FPGA to allow the Red Pitaya to act as a comerical Lock In Amplifier using continous data streaming.
+It’s all written in Python 3.8 and tested in PyCharm. PyRPL is used in this project to allow the Red Pitaya to act as a comerical Lock In Amplifier using continous data streaming and the FPGA.
 
 ---
 
@@ -20,7 +20,7 @@ There are three main programs:
    - Measure DC steps from the potentiostat faster than Rodeostat
 
 3. **Both Red Pitayas together**
-   - Run both Red Pitayas at the same time to measure DC Ramp and Lock-On Amplifier Response
+   - Run both Red Pitayas at the same time to measure DC Ramp and Lock-On Amplifier Response and create the saved files and HTML Plots
    - Do AC with DC bias experiments (ACCV)
 
 
@@ -34,6 +34,8 @@ Features
 
 Results
 
+![image](https://github.com/user-attachments/assets/6a56229c-7648-4caf-bdcf-074c723a72bd)
+![image](https://github.com/user-attachments/assets/6a56229c-7648-4caf-bdcf-074c723a72bd)
 
 
 
