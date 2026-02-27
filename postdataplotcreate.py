@@ -3,14 +3,14 @@ ACCV Cycle Averaging Module  - drop-in for startboth.py
 
 Layout: 4 columns x 4 rows
   Col 1: R magnitude plots
-  Col 2: Theta plots  
+  Col 2: Theta plots
   Col 3: R magnitude plots (continued)
   Col 4: Theta plots (continued)
 
 Row 1: R vs Time (DC overlay) | Theta vs Time (DC overlay) | R vs Time (clean) | Theta vs Time (clean)
 Row 2: R raw scatter           | Theta raw scatter           | R cycle-avg line  | Theta cycle-avg line
 Row 3: R bin-avg scatter       | Theta bin-avg scatter       | R smooth line only | Theta smooth line only
-Row 4: (spare / expandable)
+Row 4: DC vs Time (raw)        | DC vs Time (filtered)       | DC derivative      | DC histogram
 """
 
 import numpy as np
@@ -153,7 +153,7 @@ def bin_average(dc_pts, sig_pts, v_grid):
 
 
 # =============================================================================
-#  MAIN PLOT  -  4 columns x 3 rows
+#  MAIN PLOT  -  4 columns x 4 rows
 # =============================================================================
 
 def plot_accv_cycle_averaged(dc_v, li_R, li_Theta, time_s=None, theta_unit='deg',
@@ -214,17 +214,18 @@ def plot_accv_cycle_averaged(dc_v, li_R, li_Theta, time_s=None, theta_unit='deg'
         raise ImportError("pip install plotly")
 
     # =========================================================================
-    # 4 cols x 3 rows
+    # 4 cols x 4 rows
     #
     # Col:    1                        2                        3                          4
     # Row 1: R vs Time (DC overlay)   Theta vs Time (DC ovly)  R vs Time (clean)          Theta vs Time (clean)
     # Row 2: R raw scatter            Theta raw scatter         R cycle-avg line +/-1sig   Theta cycle-avg line +/-1sig
     # Row 3: R bin-avg scatter        Theta bin-avg scatter     R smooth line only         Theta smooth line only
+    # Row 4: DC raw vs Time           DC raw + filtered overlay DC derivative vs Time      DC voltage histogram
     # =========================================================================
 
     n_cyc = len(cycles)
     fig = make_subplots(
-        rows=3, cols=4,
+        rows=4, cols=4,
         subplot_titles=(
             # Row 1
             'R vs Time  |  DC Ramp overlay',
@@ -241,6 +242,11 @@ def plot_accv_cycle_averaged(dc_v, li_R, li_Theta, time_s=None, theta_unit='deg'
             'Theta vs DC  -  Bin-Averaged Scatter',
             'R vs DC  -  Smooth Averaged Line',
             'Theta vs DC  -  Smooth Averaged Line',
+            # Row 4
+            'DC Voltage vs Time  (raw)',
+            '',
+            '',
+            '',
         ),
         specs=[
             # Row 1: cols 1&2 have dual y for DC overlay, cols 3&4 plain
@@ -252,9 +258,12 @@ def plot_accv_cycle_averaged(dc_v, li_R, li_Theta, time_s=None, theta_unit='deg'
             # Row 3: all plain
             [{"secondary_y": False}, {"secondary_y": False},
              {"secondary_y": False}, {"secondary_y": False}],
+            # Row 4: all plain
+            [{"secondary_y": False}, {"secondary_y": False},
+             {"secondary_y": False}, {"secondary_y": False}],
         ],
         horizontal_spacing=0.06,
-        vertical_spacing=0.08,
+        vertical_spacing=0.07,
     )
 
     title_str = 'AC Cyclic Voltammetry  -  Full Analysis'
@@ -355,6 +364,20 @@ def plot_accv_cycle_averaged(dc_v, li_R, li_Theta, time_s=None, theta_unit='deg'
     _line(3, 4, T_dn_mn, DN_C, DN_L, showlegend=False)
 
     # =========================================================================
+    # ROW 4  -  DC-only plots
+    # =========================================================================
+    t_ds  = t_seconds[::RAW_DS].tolist()
+    ta_ds = t_axis[::RAW_DS].tolist()
+
+    # Col 1: DC raw voltage vs time
+    fig.add_trace(go.Scattergl(
+        x=t_ds, y=dc_v[::RAW_DS].tolist(),
+        mode='lines', line=dict(color=DC_C, width=1.0),
+        name='DC raw', showlegend=True,
+        hovertemplate='t=%{x:.4f}  V=%{y:.6f}<extra>DC raw</extra>',
+    ), row=4, col=1)
+
+    # =========================================================================
     # AXIS LABELS
     # =========================================================================
     # Row 1, cols 1&2 dual-y
@@ -380,9 +403,14 @@ def plot_accv_cycle_averaged(dc_v, li_R, li_Theta, time_s=None, theta_unit='deg'
         fig.update_yaxes(title_text='AC Magnitude R (V)',          row=row, col=3)
         fig.update_yaxes(title_text=f'Phase Angle ({theta_unit})', row=row, col=4)
 
+    # Row 4: DC-only axis labels
+    t_label = 'Time (s)' if time_s is not None else 'Sample Index'
+    fig.update_xaxes(title_text=t_label,          row=4, col=1)
+    fig.update_yaxes(title_text='DC Voltage (V)', row=4, col=1)
+
     fig.update_layout(
         title=dict(text=title_str, x=0.5, xanchor='center', font=dict(size=15)),
-        height=1100, width=2000,
+        height=1450, width=2000,   # taller to accommodate 4th row
         template='plotly_white',
         hovermode='closest',
         legend=dict(x=0.0, y=1.05, orientation='h',
