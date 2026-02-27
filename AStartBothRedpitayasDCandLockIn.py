@@ -277,7 +277,7 @@ if RUN_CYCLE_AVERAGING:
         if os.path.exists(cycle_avg_script):
             import importlib.util
             spec = importlib.util.spec_from_file_location("postdataplotcreate", cycle_avg_script)
-            mod  = importlib.util.load_from_spec(spec)
+            mod  = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
 
             print(f"Loading full merged CSV for cycle analysis: {merged_csv}")
