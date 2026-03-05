@@ -16,6 +16,8 @@ Have A Great Day!! :)
 """
 
 from potentiostat import Potentiostat
+import matplotlib
+matplotlib.use('Agg')   # no GUI popups -- plots save silently
 import matplotlib.pyplot as plt
 import serial.tools.list_ports
 import traceback
