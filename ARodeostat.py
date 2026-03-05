@@ -200,4 +200,7 @@ plt.title(f'{MODE.upper()} Test - I-V Curve')
 plt.grid(True)
 
 plt.tight_layout()
-plt.show()
+rodeostat_png = os.path.join(output_dir, f'{MODE.lower()}_plot_{timestamp}.png')
+plt.savefig(rodeostat_png, dpi=150, bbox_inches='tight')
+plt.close('all')
+print(f"Plot saved to {rodeostat_png}")
