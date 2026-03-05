@@ -278,7 +278,10 @@ plt.close('all')
 print(f"Saved PNG:  {combined_png}")
 
 # ============================================================
-# INTERACTIVE HTML  (plotly)
+# INTERACTIVE HTML  (plotly -- exact match to 7-panel PNG layout)
+#   Row 0: R vs Time (+ DC ramp right axis) | Theta vs Time (+ DC ramp right axis) | DC vs Time
+#   Row 1: R vs DC (line)                   | Theta vs DC (line)                    | [blank]
+#   Row 2: R vs DC (scatter)                | Theta vs DC (scatter)                 | [blank]
 # ============================================================
 try:
     import plotly.graph_objects as go
@@ -287,8 +290,8 @@ try:
     fig_html = make_subplots(
         rows=3, cols=3,
         subplot_titles=[
-            f'R vs Time | DC overlay{ds_note}',
-            f'Theta vs Time | DC overlay{ds_note}',
+            f'R vs Time  |  DC Ramp overlay{ds_note}',
+            f'Theta vs Time  |  DC Ramp overlay{ds_note}',
             f'DC vs Time{ds_note}',
             f'R vs DC Potential -- Line{ds_note}',
             f'Theta vs DC Potential -- Line{ds_note}',
@@ -298,39 +301,110 @@ try:
             '',
         ],
         specs=[
-            [{'secondary_y': True}, {'secondary_y': True}, {'secondary_y': False}],
+            [{'secondary_y': True},  {'secondary_y': True},  {'secondary_y': False}],
             [{'secondary_y': False}, {'secondary_y': False}, {'secondary_y': False}],
             [{'secondary_y': False}, {'secondary_y': False}, {'secondary_y': False}],
-        ])
+        ],
+        horizontal_spacing=0.08,
+        vertical_spacing=0.10,
+    )
 
+    # ── Row 1, Col 1: R vs Time  (DC ramp on right y-axis) ───────────────────
+    fig_html.add_trace(
+        go.Scatter(x=li_time, y=li_R, name='R (V)',
+                   line=dict(color='magenta', width=1)),
+        row=1, col=1, secondary_y=False)
+    fig_html.add_trace(
+        go.Scatter(x=li_time, y=dc_V, name='DC Ramp (R)',
+                   line=dict(color='#E65100', width=0.8), opacity=0.7,
+                   showlegend=False),
+        row=1, col=1, secondary_y=True)
+
+    # ── Row 1, Col 2: Theta vs Time  (DC ramp on right y-axis) ───────────────
+    fig_html.add_trace(
+        go.Scatter(x=li_time, y=li_Theta, name=f'Theta ({theta_unit})',
+                   line=dict(color='cyan', width=1)),
+        row=1, col=2, secondary_y=False)
+    fig_html.add_trace(
+        go.Scatter(x=li_time, y=dc_V, name='DC Ramp (Th)',
+                   line=dict(color='#E65100', width=0.8), opacity=0.7,
+                   showlegend=False),
+        row=1, col=2, secondary_y=True)
+
+    # ── Row 1, Col 3: DC vs Time ──────────────────────────────────────────────
+    fig_html.add_trace(
+        go.Scatter(x=li_time, y=dc_V, name='DC Potential (V)',
+                   line=dict(color='green', width=1)),
+        row=1, col=3)
+
+    # ── Row 2, Col 1: R vs DC  (line) ─────────────────────────────────────────
+    fig_html.add_trace(
+        go.Scatter(x=dc_V, y=li_R, name='R vs DC (line)',
+                   mode='lines', line=dict(color='blue', width=1.5)),
+        row=2, col=1)
+
+    # ── Row 2, Col 2: Theta vs DC  (line) ─────────────────────────────────────
+    fig_html.add_trace(
+        go.Scatter(x=dc_V, y=li_Theta, name='Theta vs DC (line)',
+                   mode='lines', line=dict(color='red', width=1.5)),
+        row=2, col=2)
+
+    # ── Row 3, Col 1: R vs DC  (scatter) ──────────────────────────────────────
+    fig_html.add_trace(
+        go.Scatter(x=dc_V, y=li_R, name='R vs DC (scatter)',
+                   mode='markers', marker=dict(size=2, color='blue', opacity=0.5)),
+        row=3, col=1)
+
+    # ── Row 3, Col 2: Theta vs DC  (scatter) ──────────────────────────────────
+    fig_html.add_trace(
+        go.Scatter(x=dc_V, y=li_Theta, name='Theta vs DC (scatter)',
+                   mode='markers', marker=dict(size=2, color='red', opacity=0.5)),
+        row=3, col=2)
+
+    # ── Axis labels ───────────────────────────────────────────────────────────
     # Row 1
-    fig_html.add_trace(go.Scatter(x=li_time, y=li_R,     name='R (V)',   line=dict(color='magenta', width=1)),   row=1, col=1, secondary_y=False)
-    fig_html.add_trace(go.Scatter(x=li_time, y=dc_V,     name='DC (R)',  line=dict(color='#E65100', width=0.8), showlegend=False), row=1, col=1, secondary_y=True)
-    fig_html.add_trace(go.Scatter(x=li_time, y=li_Theta, name='Theta',   line=dict(color='cyan',    width=1)),   row=1, col=2, secondary_y=False)
-    fig_html.add_trace(go.Scatter(x=li_time, y=dc_V,     name='DC (Th)', line=dict(color='#E65100', width=0.8), showlegend=False), row=1, col=2, secondary_y=True)
-    fig_html.add_trace(go.Scatter(x=li_time, y=dc_V,     name='DC (V)',  line=dict(color='green',   width=1)),   row=1, col=3)
-
+    fig_html.update_yaxes(title_text='AC Magnitude R (V)', title_font=dict(color='magenta'), row=1, col=1, secondary_y=False)
+    fig_html.update_yaxes(title_text='DC Ramp (V)',         title_font=dict(color='#E65100'), row=1, col=1, secondary_y=True)
+    fig_html.update_yaxes(title_text=f'Phase Angle ({theta_unit})', title_font=dict(color='cyan'), row=1, col=2, secondary_y=False)
+    fig_html.update_yaxes(title_text='DC Ramp (V)',         title_font=dict(color='#E65100'), row=1, col=2, secondary_y=True)
+    fig_html.update_yaxes(title_text='DC Potential (V)',    row=1, col=3)
+    fig_html.update_xaxes(title_text='Time (s)', row=1, col=1)
+    fig_html.update_xaxes(title_text='Time (s)', row=1, col=2)
+    fig_html.update_xaxes(title_text='Time (s)', row=1, col=3)
     # Row 2
-    fig_html.add_trace(go.Scatter(x=dc_V, y=li_R,     name='R vs DC',     mode='lines',   line=dict(color='blue', width=1.5)),  row=2, col=1)
-    fig_html.add_trace(go.Scatter(x=dc_V, y=li_Theta, name='Theta vs DC', mode='lines',   line=dict(color='red',  width=1.5)),  row=2, col=2)
-
+    fig_html.update_xaxes(title_text='DC Potential (V)', row=2, col=1)
+    fig_html.update_xaxes(title_text='DC Potential (V)', row=2, col=2)
+    fig_html.update_yaxes(title_text='AC Magnitude R (V)',          row=2, col=1)
+    fig_html.update_yaxes(title_text=f'Phase Angle ({theta_unit})', row=2, col=2)
     # Row 3
-    fig_html.add_trace(go.Scatter(x=dc_V, y=li_R,     name='R scatter',     mode='markers', marker=dict(size=2, color='blue', opacity=0.5)), row=3, col=1)
-    fig_html.add_trace(go.Scatter(x=dc_V, y=li_Theta, name='Theta scatter', mode='markers', marker=dict(size=2, color='red',  opacity=0.5)), row=3, col=2)
+    fig_html.update_xaxes(title_text='DC Potential (V)', row=3, col=1)
+    fig_html.update_xaxes(title_text='DC Potential (V)', row=3, col=2)
+    fig_html.update_yaxes(title_text='AC Magnitude R (V)',          row=3, col=1)
+    fig_html.update_yaxes(title_text=f'Phase Angle ({theta_unit})', row=3, col=2)
+
+    # Hide the two blank panels (row 2 col 3, row 3 col 3)
+    fig_html.update_xaxes(visible=False, row=2, col=3)
+    fig_html.update_yaxes(visible=False, row=2, col=3)
+    fig_html.update_xaxes(visible=False, row=3, col=3)
+    fig_html.update_yaxes(visible=False, row=3, col=3)
 
     fig_html.update_layout(
-        height=900, width=1400,
-        title_text=(f'AC Cyclic Voltammetry -- Synchronized Dual Red Pitaya<br>'
-                    f'{n_samples:,} raw -> {n_ds:,} plotted (step={step}) @ {effective_rate:.1f} Hz'),
-        title_font_size=14)
+        height=1000, width=1500,
+        title_text=(
+            f'AC Cyclic Voltammetry -- Synchronized Dual Red Pitaya Measurements<br>'
+            f'<sup>{n_samples:,} raw samples -> {n_ds:,} plotted (step={step}) '
+            f'@ {effective_rate:.1f} Hz</sup>'),
+        title_font_size=16,
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+    )
+    fig_html.update_xaxes(showgrid=True, gridcolor='lightgrey', gridwidth=0.5)
+    fig_html.update_yaxes(showgrid=True, gridcolor='lightgrey', gridwidth=0.5)
 
     combined_html = os.path.join(OUTPUT_DIRECTORY, f'accv_combined_{timestamp_str}.html')
     fig_html.write_html(combined_html)
     print(f"Saved HTML: {combined_html}")
-
-    # Open in default browser
-    import webbrowser
-    webbrowser.open(f'file:///{os.path.abspath(combined_html)}')
+    # (browser will open the cycle-averaged HTML instead -- see below)
 
 except ImportError:
     print("Note: plotly not installed -- skipping HTML  (pip install plotly)")
@@ -390,6 +464,21 @@ if RUN_CYCLE_AVERAGING:
                 fig_ca.savefig(ca_png, dpi=150, bbox_inches='tight')
                 plt.close(fig_ca)
                 print(f"Saved cycle-avg PNG: {ca_png}")
+
+            # Open the cycle-averaged HTML in browser (it's saved by postdataplotcreate)
+            import webbrowser, glob as _glob
+            ca_htmls = sorted(_glob.glob(os.path.join(OUTPUT_DIRECTORY, f'accv_cycle_averaged_{timestamp_str}.html')))
+            if not ca_htmls:
+                # fallback: find most recently created cycle-averaged html
+                ca_htmls = sorted(_glob.glob(os.path.join(OUTPUT_DIRECTORY, 'accv_cycle_averaged_*.html')),
+                                  key=os.path.getctime)
+            if ca_htmls:
+                webbrowser.open(f'file:///{os.path.abspath(ca_htmls[-1])}')
+            else:
+                # fall back to 7-panel HTML if cycle-avg HTML not found
+                _fb = os.path.join(OUTPUT_DIRECTORY, f'accv_combined_{timestamp_str}.html')
+                if os.path.exists(_fb):
+                    webbrowser.open(f'file:///{os.path.abspath(_fb)}')
 
         else:
             print(f"  (postdataplotcreate.py not found at {cycle_avg_script})")
