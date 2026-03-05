@@ -10,424 +10,379 @@ Have A Great Day!! :)
 -Dominic
 """
 
-import os
-import time
-import numpy as np
-from matplotlib import pyplot as plt
-from pyrpl import Pyrpl
-from potentiostat import Potentiostat
-import serial.tools.list_ports
-import traceback
+
+import subprocess
 from datetime import datetime
-import threading
-import yaml
-
-# ------------------------- Red Pitaya Parameters -------------------------
-RP_HOSTNAME = 'rp-f073ce.local'  # Red Pitaya network address
-RP_OUTPUT_DIR = 'accv_data'
-RP_YAML_FILE = 'red_rodeo_config.yml'
-
-# AC signal settings (Red Pitaya)
-AC_FREQ = 1000  # Hz
-AC_AMP = 0.05  # V amplitude
-AC_OFFSET = 0.0  # DC offset
-SHUNT_RESISTOR = 10000  # Ohms for current calculation
-
-# ------------------------- Rodeostat Parameters -------------------------
-CV_MODE = 'CV'
-CURR_RANGE = '1000uA'
-SAMPLE_RATE = 100.0
-QUIET_TIME = 0
-QUIET_VALUE = 0.0
-
-VOLT_MIN = 0.5
-VOLT_MAX = 1.0
-VOLT_PER_SEC = 0.05
-NUM_CYCLES = 1
-
-V_START = 0.8
-V_END = 1.0
-DC_RUNTIME = 30
-
-
-# ----------------------------------------------------------------------
-
-class RedPitayaACMeasurement:
-    """Handles Red Pitaya AC waveform measurements"""
-
-    def __init__(self, hostname=RP_HOSTNAME, yaml_file=RP_YAML_FILE):
-        self.yaml_file = yaml_file
-        self.shunt_resistor = SHUNT_RESISTOR
-        self.is_running = False
-        self.data_buffer = []
-        self.lock = threading.Lock()
-
-        # Create YAML config
-        self.create_yaml()
-
-        # Connect to Red Pitaya
-        print("Connecting to Red Pitaya...")
-        self.rp = Pyrpl(config=self.yaml_file, gui=False, hostname=hostname)
-
-        # Direct access to scope and ASG
-        self.scope = self.rp.rp.scope
-        self.asg = self.rp.rp.asg0
-
-        # Configure ASG first (output signal)
-        print("Configuring AC output signal...")
-        self.asg.setup(
-            waveform='sin',
-            frequency=AC_FREQ,
-            amplitude=AC_AMP,
-            offset=AC_OFFSET,
-            output_direct='out1',
-            trigger_source='immediately'
-        )
-        self.asg.output_direct = 'out1'  # Ensure output is enabled
-
-        # Configure Scope for continuous acquisition
-        print("Configuring oscilloscope...")
-        self.scope.input1 = 'in1'  # Current measurement (through shunt)
-        self.scope.input2 = 'out1'  # Voltage output (direct from ASG)
-        self.scope.duration = 0.01  # 10ms capture window
-        self.scope.decimation = 64  # Faster sampling
-        self.scope.trigger_source = 'immediately'  # Continuous trigger
-        self.scope.trigger_delay = 0
-        self.scope.ch1_active = True
-        self.scope.ch2_active = True
-        self.scope.average = False  # No averaging for real-time
-
-        # Calculate actual sample rate
-        self.sample_rate = 125e6 / self.scope.decimation
-        print(f"Sample rate: {self.sample_rate / 1e6:.2f} MHz ({self.sample_rate / 1e3:.1f} kHz)")
-        print(f"Samples per waveform: {int(self.sample_rate / AC_FREQ)}")
-
-        # Start continuous acquisition
-        self.scope.running_state = 'running_continuous'
-
-        print(f"Red Pitaya ready - AC Output: {AC_FREQ} Hz, {AC_AMP} V amplitude")
-
-    def create_yaml(self):
-        """Create minimal YAML config that pre-loads modules"""
-        config = {
-            'name': 'red_rodeo_accv',
-            'redpitaya_hostname': RP_HOSTNAME,
-            'gui_config': {
-                'show_gui': False
-            },
-            'scope': {
-                'input1': 'in1',
-                'input2': 'out1',
-                'duration': 0.01,
-                'trigger_source': 'immediately',
-                'decimation': 64,
-                'ch1_active': True,
-                'ch2_active': True,
-                'running_state': 'running_continuous'
-            },
-            'asg0': {
-                'frequency': AC_FREQ,
-                'amplitude': AC_AMP,
-                'offset': AC_OFFSET,
-                'waveform': 'sin',
-                'output_direct': 'out1',
-                'trigger_source': 'immediately'
-            }
-        }
-        with open(self.yaml_file, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False)
-        print(f"Created config: {self.yaml_file}")
-
-    def capture(self):
-        """Capture latest voltage from Red Pitaya scope"""
-        try:
-            # Correct way to access scope data in PyRPL - use the private data attributes
-            ch1_data = np.array(self.scope._data_ch1)  # Current (through shunt)
-            ch2_data = np.array(self.scope._data_ch2)  # Voltage (from ASG)
-
-            if ch1_data.size > 0 and ch2_data.size > 0:
-                return ch1_data, ch2_data
-            return None, None
-        except Exception as e:
-            print(f"Red Pitaya capture error: {e}")
-            return None, None
-
-    def calculate_current(self, voltage):
-        """Convert voltage across shunt to current"""
-        return voltage / self.shunt_resistor
-
-    def collect_data_continuously(self):
-        """Continuously collect waveform data in background thread"""
-        self.is_running = True
-        print("Red Pitaya continuous acquisition started")
-
-        capture_count = 0
-        while self.is_running:
-            ch1, ch2 = self.capture()
-            if ch1 is not None and ch2 is not None:
-                current = self.calculate_current(ch1)
-                timestamp = time.time()
-
-                with self.lock:
-                    self.data_buffer.append({
-                        'timestamp': timestamp,
-                        'voltage': ch2.copy(),
-                        'current': current.copy()
-                    })
-                    # Keep only last 100 captures to prevent memory overflow
-                    if len(self.data_buffer) > 100:
-                        self.data_buffer.pop(0)
-
-                capture_count += 1
-                if capture_count % 20 == 0:
-                    print(f"Captured {capture_count} waveforms, buffer size: {len(self.data_buffer)}")
-
-            time.sleep(0.01)  # 100 Hz capture rate for waveforms
-
-        print(f"Red Pitaya acquisition stopped after {capture_count} captures")
-
-    def get_data(self):
-        """Thread-safe data retrieval"""
-        with self.lock:
-            return self.data_buffer.copy()
-
-    def stop(self):
-        """Stop continuous acquisition"""
-        self.is_running = False
-        time.sleep(0.1)  # Allow thread to finish
-
-    def cleanup(self):
-        """Clean shutdown"""
-        self.stop()
-        try:
-            self.scope.running_state = 'stopped'
-            self.asg.output_direct = 'off'
-        except:
-            pass
-
-
-# ------------------------- Rodeostat CV -------------------------
-class RodeostatCVMeasurement:
-    def __init__(self, port):
-        print(f"Connecting to Rodeostat on {port}...")
-        self.dev = Potentiostat(port)
-        try:
-            _ = self.dev.get_all_curr_range()
-        except KeyError:
-            print("Unknown firmware patch - setting manual configuration")
-            self.dev.hw_variant = 'manual_patch'
-            self.dev.get_all_curr_range = lambda: ['1uA', '10uA', '100uA', '1000uA']
-        print("Rodeostat connected")
-
-    def configure(self, mode, volt_min, volt_max, volt_per_sec, num_cycles,
-                  v_start, v_end, dc_runtime, curr_range, sample_rate,
-                  quiet_time, quiet_value):
-        amplitude = (volt_max - volt_min) / 2
-        offset = (volt_max + volt_min) / 2
-        period_ms = int(1000 * 4 * amplitude / volt_per_sec) if amplitude != 0 else 1000
-
-        test_param = {
-            'quietValue': quiet_value,
-            'quietTime': quiet_time,
-            'amplitude': amplitude,
-            'offset': offset,
-            'period': period_ms,
-            'numCycles': num_cycles,
-            'shift': 0.0
-        }
-
-        self.dev.set_curr_range(curr_range)
-        self.dev.set_sample_rate(sample_rate)
-        self.dev.set_param('cyclic', test_param)
-
-        print(f"CV configured: {volt_min}V to {volt_max}V @ {volt_per_sec}V/s, {num_cycles} cycles")
-        print(f"Period: {period_ms}ms, Sample rate: {sample_rate}Hz")
-
-    def run_test(self):
-        print("Starting CV sweep...")
-        t, volt, curr = self.dev.run_test('cyclic', display='data', filename=None)
-        print(f"CV sweep complete - {len(t)} data points")
-        return t, volt, curr
-
-
-# ------------------------- ACCV Experiment -------------------------
-class ACCVExperiment:
-    def __init__(self):
-        self.output_dir = RP_OUTPUT_DIR
-        os.makedirs(self.output_dir, exist_ok=True)
-        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.red_pitaya = None
-        self.rodeostat = None
-        self.ac_thread = None
-
-    def setup_devices(self, rodeostat_port):
-        # Red Pitaya setup
-        print("\n=== Setting up Red Pitaya ===")
-        self.red_pitaya = RedPitayaACMeasurement()
-
-        # Rodeostat setup
-        print("\n=== Setting up Rodeostat ===")
-        self.rodeostat = RodeostatCVMeasurement(rodeostat_port)
-        self.rodeostat.configure(
-            CV_MODE, VOLT_MIN, VOLT_MAX, VOLT_PER_SEC, NUM_CYCLES,
-            V_START, V_END, DC_RUNTIME, CURR_RANGE, SAMPLE_RATE,
-            QUIET_TIME, QUIET_VALUE
-        )
-
-        print("\n=== Devices ready ===\n")
-
-    def run_synchronized_test(self):
-        """Run CV while recording Red Pitaya AC waveform"""
-        print("Starting synchronized ACCV measurement...")
-
-        # Start Red Pitaya continuous acquisition thread
-        self.ac_thread = threading.Thread(target=self.red_pitaya.collect_data_continuously)
-        self.ac_thread.daemon = True
-        self.ac_thread.start()
-
-        # Wait for stable acquisition
-        print("Waiting for Red Pitaya to stabilize...")
-        time.sleep(2.0)
-
-        # Check if data is being collected
-        initial_data = self.red_pitaya.get_data()
-        print(f"Red Pitaya collecting data: {len(initial_data)} waveforms captured")
-
-        # Run Rodeostat CV sweep
-        print("\n--- Running Rodeostat CV ---")
-        t_cv, volt_cv, curr_cv = self.rodeostat.run_test()
-        print("--- CV complete ---\n")
-
-        # Stop Red Pitaya and collect all data
-        print("Stopping Red Pitaya acquisition...")
-        self.red_pitaya.stop()
-        if self.ac_thread.is_alive():
-            self.ac_thread.join(timeout=3)
-
-        rp_data = self.red_pitaya.get_data()
-        print(f"Red Pitaya data collected: {len(rp_data)} total waveforms")
-
-        return t_cv, volt_cv, curr_cv, rp_data
-
-    def save_data(self, t_cv, volt_cv, curr_cv, rp_data):
-        # Save CV data
-        cv_filename = os.path.join(self.output_dir, f'cv_{self.timestamp}.csv')
-        np.savetxt(cv_filename, np.column_stack((t_cv, volt_cv, curr_cv)),
-                   delimiter=',', header='Time(s),Voltage(V),Current(uA)', comments='')
-        print(f"CV data saved to {cv_filename}")
-
-        # Save Red Pitaya waveforms (last few captures)
-        if rp_data:
-            # Save last capture
-            last = rp_data[-1]
-            rp_filename = os.path.join(self.output_dir, f'redpitaya_last_{self.timestamp}.csv')
-            np.savetxt(rp_filename, np.column_stack((last['voltage'], last['current'])),
-                       delimiter=',', header='Voltage(V),Current(A)', comments='')
-            print(f"Red Pitaya last waveform saved to {rp_filename}")
-
-            # Save all timestamps
-            timestamps = [d['timestamp'] for d in rp_data]
-            ts_filename = os.path.join(self.output_dir, f'redpitaya_timestamps_{self.timestamp}.csv')
-            np.savetxt(ts_filename, timestamps, delimiter=',',
-                       header='Timestamp', comments='')
-            print(f"Red Pitaya timestamps saved to {ts_filename}")
-
-    def plot_results(self, t_cv, volt_cv, curr_cv, rp_data):
-        fig, axes = plt.subplots(2, 3, figsize=(16, 10))
-        fig.suptitle(f'ACCV Results - {self.timestamp}', fontsize=14)
-
-        # Rodeostat CV plots
-        axes[0, 0].plot(t_cv, volt_cv, color='tab:blue', linewidth=1.5)
-        axes[0, 0].set_title('Rodeostat: Voltage vs Time')
-        axes[0, 0].set_xlabel('Time (s)')
-        axes[0, 0].set_ylabel('Voltage (V)')
-        axes[0, 0].grid(True, alpha=0.3)
-
-        axes[0, 1].plot(t_cv, curr_cv, color='tab:red', linewidth=1.5)
-        axes[0, 1].set_title('Rodeostat: Current vs Time')
-        axes[0, 1].set_xlabel('Time (s)')
-        axes[0, 1].set_ylabel('Current (µA)')
-        axes[0, 1].grid(True, alpha=0.3)
-
-        axes[0, 2].plot(volt_cv, curr_cv, color='tab:purple', linewidth=1.5)
-        axes[0, 2].set_title('Rodeostat: CV Curve')
-        axes[0, 2].set_xlabel('Voltage (V)')
-        axes[0, 2].set_ylabel('Current (µA)')
-        axes[0, 2].grid(True, alpha=0.3)
-
-        # Red Pitaya AC waveform plots (last measurement)
-        if rp_data:
-            last = rp_data[-1]
-            t_rp = np.arange(len(last['voltage'])) / self.red_pitaya.sample_rate * 1000  # ms
-
-            axes[1, 0].plot(t_rp, last['voltage'], color='tab:blue', linewidth=1)
-            axes[1, 0].set_title('Red Pitaya: AC Voltage Waveform')
-            axes[1, 0].set_xlabel('Time (ms)')
-            axes[1, 0].set_ylabel('Voltage (V)')
-            axes[1, 0].grid(True, alpha=0.3)
-
-            axes[1, 1].plot(t_rp, last['current'] * 1e6, color='tab:red', linewidth=1)
-            axes[1, 1].set_title('Red Pitaya: AC Current Waveform')
-            axes[1, 1].set_xlabel('Time (ms)')
-            axes[1, 1].set_ylabel('Current (µA)')
-            axes[1, 1].grid(True, alpha=0.3)
-
-            axes[1, 2].plot(last['voltage'], last['current'] * 1e6,
-                            color='tab:purple', linewidth=1, alpha=0.6)
-            axes[1, 2].set_title('Red Pitaya: AC I-V Curve')
-            axes[1, 2].set_xlabel('Voltage (V)')
-            axes[1, 2].set_ylabel('Current (µA)')
-            axes[1, 2].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        plot_filename = os.path.join(self.output_dir, f'accv_plot_{self.timestamp}.png')
-        plt.savefig(plot_filename, dpi=150)
-        print(f"Plot saved to {plot_filename}")
-        plt.show()
-
-    def cleanup(self):
-        """Clean shutdown of devices"""
-        if self.red_pitaya:
-            self.red_pitaya.cleanup()
-
-
-# ------------------------- Main -------------------------
-def main():
-    # Find Rodeostat port
-    ports = serial.tools.list_ports.comports()
-    if not ports:
-        raise SystemExit("No serial ports found.")
-
-    print("Available COM ports:")
-    for i, p in enumerate(ports):
-        print(f"{i}: {p.device} - {p.description}")
-
-    choice = int(input("Select Rodeostat port number: "))
-    rodeostat_port = ports[choice].device
-
-    exp = None
+import time
+import sys
+import os
+import numpy as np
+import pandas as pd
+from matplotlib import pyplot as plt
+import glob
+
+# ============================================================
+# PARAMETERS
+# ============================================================
+OUTPUT_DIRECTORY = 'test_data'
+START_TIME_FILE  = "start_time.txt"
+
+# ============================================================
+# COMBINED PLOT DOWNSAMPLING
+# ============================================================
+# Individual CSVs are always saved at full resolution by each script.
+# This only affects the merged combined_results CSV and the ACCV PNG.
+COMBINED_MAX_POINTS = 10_000
+# ============================================================
+
+# ============================================================
+# CYCLE AVERAGING ANALYSIS  (runs after measurement)
+# ============================================================
+# Set to False to skip the interactive cycle-averaged plot
+RUN_CYCLE_AVERAGING = True
+# ============================================================
+
+print("=" * 60)
+print("TRIPLE SYNCHRONIZED ACQUISITION")
+print("  Dual Red Pitaya  +  Rodeostat")
+print("=" * 60)
+
+python_exe = sys.executable
+
+lockin_script    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lockin_with_timestamp.py")
+dc_script        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dc_monitor_with_timestamp.py")
+rodeostat_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "RodeostatControl.py")
+
+for label, path in [("Lock-in script", lockin_script),
+                     ("DC script",      dc_script),
+                     ("Rodeostat script", rodeostat_script)]:
+    if not os.path.exists(path):
+        print(f"Error: {label} not found at {path}!")
+        sys.exit(1)
+
+print(f"Lock-in script:    {lockin_script}")
+print(f"DC script:         {dc_script}")
+print(f"Rodeostat script:  {rodeostat_script}")
+print("=" * 60)
+
+# ── First Enter: launch all three subprocesses ────────────────────────────────
+input("\nPress Enter to start all three acquisitions...")
+print("")
+
+START_TIME = datetime.now() + pd.Timedelta(seconds=2)
+with open(START_TIME_FILE, "w") as f:
+    f.write(START_TIME.isoformat())
+
+print(f"Start time scheduled: {START_TIME.strftime('%Y-%m-%d %H:%M:%S.%f')}")
+print("Launching all three subprocesses...")
+print("  Watch for both RPs to connect AND the Rodeostat port prompt below...")
+print("")
+
+proc_lockin    = subprocess.Popen([python_exe, lockin_script],    stdin=subprocess.PIPE)
+proc_dc        = subprocess.Popen([python_exe, dc_script],        stdin=subprocess.PIPE)
+proc_rodeostat = subprocess.Popen([python_exe, rodeostat_script], stdin=subprocess.PIPE)
+
+# ── Second Enter: fires all three simultaneously ──────────────────────────────
+input("Press Enter when both RPs are connected, Rodeostat is ready, and you want to START...")
+print("")
+
+for proc, label in [(proc_lockin,    "lock-in"),
+                    (proc_dc,        "DC"),
+                    (proc_rodeostat, "Rodeostat")]:
+    proc.stdin.write(b"\n")
+    proc.stdin.flush()
+    print(f"  -> Sent Enter to {label}")
+
+print("\nWaiting for all acquisitions to complete...")
+proc_lockin.wait()
+proc_dc.wait()
+proc_rodeostat.wait()
+print("\nAll three acquisitions finished")
+
+try:
+    os.remove(START_TIME_FILE)
+except Exception:
+    pass
+
+time.sleep(0.5)
+
+# ============================================================
+# INDEX-BASED MERGING  (downsampled for speed)
+# ============================================================
+try:
+    lockin_csv    = max(glob.glob(os.path.join(OUTPUT_DIRECTORY, 'lockin_results_*.csv')),  key=os.path.getctime)
+    dc_csv        = max(glob.glob(os.path.join(OUTPUT_DIRECTORY, 'dc_voltage_*.csv')),      key=os.path.getctime)
+    rodeostat_csv = max(glob.glob(os.path.join('rodeostat_data',  '*_data_*.csv')),         key=os.path.getctime)
+except ValueError as e:
+    print(f"Error: Could not find output files! ({e})")
+    sys.exit(1)
+
+print("\n" + "=" * 60)
+print("MERGING DATA (INDEX-BASED)")
+print("=" * 60)
+
+print("Reading lock-in CSV...")
+lockin_data = pd.read_csv(lockin_csv, comment='#', encoding='latin-1',
+                          usecols=lambda c: c in ('Time(s)', 'R(V)', 'Theta(deg)',
+                                                   'Theta(\xb0)', 'Theta(rad)', 'X(V)', 'Y(V)'))
+print("Reading DC CSV...")
+dc_data = pd.read_csv(dc_csv, comment='#', encoding='latin-1',
+                      usecols=lambda c: c in ('Time(s)', 'Voltage(V)'))
+
+print(f"Reading Rodeostat CSV: {rodeostat_csv}")
+rodeostat_data = pd.read_csv(rodeostat_csv, comment='#', encoding='latin-1')
+# Normalise column names  (rodeostat_test.py writes: Time(s), Voltage(V), Current(uA))
+rodeostat_data.columns = [c.strip() for c in rodeostat_data.columns]
+
+n_lockin    = len(lockin_data)
+n_dc        = len(dc_data)
+n_rodeostat = len(rodeostat_data)
+n_samples   = min(n_lockin, n_dc)   # RP merge is limited to shorter of the two
+
+print(f"Lock-in samples:    {n_lockin:,}")
+print(f"DC samples:         {n_dc:,}")
+print(f"Rodeostat samples:  {n_rodeostat:,}")
+print(f"RP common samples:  {n_samples:,}")
+
+if n_lockin != n_dc:
+    diff = abs(n_lockin - n_dc)
+    print(f"RP sample mismatch: {diff:,} ({diff/max(n_lockin,n_dc)*100:.1f}%)")
+
+if   'Theta(deg)' in lockin_data.columns:  theta_col, theta_unit = 'Theta(deg)', 'deg'
+elif 'Theta(\xb0)' in lockin_data.columns: theta_col, theta_unit = 'Theta(\xb0)', '\xb0'
+else:                                       theta_col, theta_unit = 'Theta(rad)', 'rad'
+
+# ── Downsample RP data ────────────────────────────────────────────────────────
+step  = max(1, n_samples // COMBINED_MAX_POINTS)
+idx   = np.arange(0, n_samples, step)
+n_ds  = len(idx)
+print(f"\nRP Downsampling: {n_samples:,} -> {n_ds:,} pts (step={step})")
+
+li_time  = lockin_data['Time(s)'].values[:n_samples][idx]
+li_R     = lockin_data['R(V)'].values[:n_samples][idx]
+li_Theta = lockin_data[theta_col].values[:n_samples][idx]
+li_X     = lockin_data['X(V)'].values[:n_samples][idx]
+li_Y     = lockin_data['Y(V)'].values[:n_samples][idx]
+dc_time  = dc_data['Time(s)'].values[:n_samples][idx]
+dc_V     = dc_data['Voltage(V)'].values[:n_samples][idx]
+
+time_diff = li_time - dc_time
+print(f"\nRP Time sync -- mean: {np.mean(time_diff)*1000:.3f} ms  "
+      f"max: {np.max(np.abs(time_diff))*1000:.3f} ms")
+if   np.max(np.abs(time_diff)) < 0.1: print("  Excellent sync (< 100 ms)")
+elif np.max(np.abs(time_diff)) < 0.5: print("  Good sync (< 500 ms)")
+else:                                  print("  Poor sync (> 500 ms)")
+
+# ── Rodeostat data (kept at its own native rate) ──────────────────────────────
+rs_time    = rodeostat_data['Time(s)'].values
+rs_voltage = rodeostat_data['Voltage(V)'].values
+rs_current = rodeostat_data['Current(uA)'].values
+print(f"\nRodeostat: {len(rs_time):,} samples over {rs_time[-1]:.2f} s "
+      f"({len(rs_time)/rs_time[-1]:.1f} Hz)")
+
+# ── Save merged RP CSV ────────────────────────────────────────────────────────
+timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+merged_csv    = os.path.join(OUTPUT_DIRECTORY, f'combined_results_{timestamp_str}.csv')
+pd.DataFrame({
+    'Index':      np.arange(n_ds),
+    'Time_RP1':   li_time,
+    'Time_RP2':   dc_time,
+    'R':          li_R,
+    'Theta':      li_Theta,
+    'X':          li_X,
+    'Y':          li_Y,
+    'DC_Voltage': dc_V,
+}).to_csv(merged_csv, index=False)
+print(f"\nSaved merged RP CSV ({n_ds:,} rows, step={step}): {merged_csv}")
+
+# ============================================================
+# PLOT -- 9 panels across 3 rows
+#   Row 1: R vs Time  |  Theta vs Time  |  DC vs Time
+#   Row 2: R vs DC (line)  |  Theta vs DC (line)  |  Rodeostat IV curve
+#   Row 3: R vs DC (scatter)  |  Theta vs DC (scatter)  |  Rodeostat I vs Time
+# ============================================================
+ds_note = f' [1:{step} ds]' if step > 1 else ''
+
+fig, axes = plt.subplots(3, 3, figsize=(20, 15))
+
+ax_R_t      = axes[0, 0]
+ax_Th_t     = axes[0, 1]
+ax_DC_t     = axes[0, 2]
+ax_R_DC     = axes[1, 0]
+ax_Th_DC    = axes[1, 1]
+ax_rs_IV    = axes[1, 2]
+ax_R_DC_sc  = axes[2, 0]
+ax_Th_DC_sc = axes[2, 1]
+ax_rs_It    = axes[2, 2]
+
+# ── R vs Time (DC ramp overlay) ───────────────────────────────────────────────
+ax_R_t.plot(li_time, li_R, 'm-', linewidth=1.0, label='R (lock-in)')
+ax_R_t.set_xlabel('Time (s)',            fontsize=12, fontweight='bold')
+ax_R_t.set_ylabel('AC Magnitude R (V)',  fontsize=12, fontweight='bold', color='m')
+ax_R_t.set_title(f'R vs Time  |  DC Ramp overlay{ds_note}', fontsize=13, fontweight='bold')
+ax_R_t.grid(True, alpha=0.3)
+ax_R_t_dc = ax_R_t.twinx()
+ax_R_t_dc.plot(li_time, dc_V, color='#E65100', linewidth=0.8, alpha=0.7, label='DC Ramp')
+ax_R_t_dc.set_ylabel('DC Ramp (V)', fontsize=11, color='#E65100')
+ax_R_t_dc.tick_params(axis='y', labelcolor='#E65100')
+
+# ── Theta vs Time (DC ramp overlay) ──────────────────────────────────────────
+ax_Th_t.plot(li_time, li_Theta, 'c-', linewidth=1.0, label='Theta')
+ax_Th_t.set_xlabel('Time (s)',                     fontsize=12, fontweight='bold')
+ax_Th_t.set_ylabel(f'Phase Angle ({theta_unit})',  fontsize=12, fontweight='bold', color='c')
+ax_Th_t.set_title(f'Theta vs Time  |  DC Ramp overlay{ds_note}', fontsize=13, fontweight='bold')
+ax_Th_t.grid(True, alpha=0.3)
+ax_Th_t_dc = ax_Th_t.twinx()
+ax_Th_t_dc.plot(li_time, dc_V, color='#E65100', linewidth=0.8, alpha=0.7, label='DC Ramp')
+ax_Th_t_dc.set_ylabel('DC Ramp (V)', fontsize=11, color='#E65100')
+ax_Th_t_dc.tick_params(axis='y', labelcolor='#E65100')
+
+# ── DC vs Time ────────────────────────────────────────────────────────────────
+ax_DC_t.plot(li_time, dc_V, 'g-', linewidth=1.0)
+ax_DC_t.set_xlabel('Time (s)',          fontsize=12, fontweight='bold')
+ax_DC_t.set_ylabel('DC Potential (V)',  fontsize=12, fontweight='bold')
+ax_DC_t.set_title(f'DC vs Time{ds_note}', fontsize=13, fontweight='bold')
+ax_DC_t.grid(True, alpha=0.3)
+
+# ── R vs DC (line) ────────────────────────────────────────────────────────────
+ax_R_DC.plot(dc_V, li_R, 'b-', linewidth=1.5, alpha=0.8)
+ax_R_DC.set_xlabel('DC Potential (V)',     fontsize=12, fontweight='bold')
+ax_R_DC.set_ylabel('AC Magnitude R (V)',   fontsize=12, fontweight='bold')
+ax_R_DC.set_title(f'R vs DC Potential -- Line{ds_note}', fontsize=13, fontweight='bold')
+ax_R_DC.grid(True, alpha=0.3)
+
+# ── Theta vs DC (line) ───────────────────────────────────────────────────────
+ax_Th_DC.plot(dc_V, li_Theta, 'r-', linewidth=1.5, alpha=0.8)
+ax_Th_DC.set_xlabel('DC Potential (V)',             fontsize=12, fontweight='bold')
+ax_Th_DC.set_ylabel(f'Phase Angle ({theta_unit})',  fontsize=12, fontweight='bold')
+ax_Th_DC.set_title(f'Theta vs DC Potential -- Line{ds_note}', fontsize=13, fontweight='bold')
+ax_Th_DC.grid(True, alpha=0.3)
+
+# ── Rodeostat: I-V curve (the ACCV context) ───────────────────────────────────
+ax_rs_IV.plot(rs_voltage, rs_current, color='darkorange', linewidth=1.5, alpha=0.9)
+ax_rs_IV.set_xlabel('Voltage (V)',    fontsize=12, fontweight='bold')
+ax_rs_IV.set_ylabel('Current (uA)',   fontsize=12, fontweight='bold')
+ax_rs_IV.set_title('Rodeostat  --  I-V Curve', fontsize=13, fontweight='bold')
+ax_rs_IV.grid(True, alpha=0.3)
+
+# ── R vs DC (scatter) ────────────────────────────────────────────────────────
+ax_R_DC_sc.scatter(dc_V, li_R, s=3, alpha=0.5, color='b')
+ax_R_DC_sc.set_xlabel('DC Potential (V)',     fontsize=12, fontweight='bold')
+ax_R_DC_sc.set_ylabel('AC Magnitude R (V)',   fontsize=12, fontweight='bold')
+ax_R_DC_sc.set_title(f'R vs DC Potential -- Scatter{ds_note}', fontsize=13, fontweight='bold')
+ax_R_DC_sc.grid(True, alpha=0.3)
+
+# ── Theta vs DC (scatter) ────────────────────────────────────────────────────
+ax_Th_DC_sc.scatter(dc_V, li_Theta, s=3, alpha=0.5, color='r')
+ax_Th_DC_sc.set_xlabel('DC Potential (V)',             fontsize=12, fontweight='bold')
+ax_Th_DC_sc.set_ylabel(f'Phase Angle ({theta_unit})',  fontsize=12, fontweight='bold')
+ax_Th_DC_sc.set_title(f'Theta vs DC Potential -- Scatter{ds_note}', fontsize=13, fontweight='bold')
+ax_Th_DC_sc.grid(True, alpha=0.3)
+
+# ── Rodeostat: Current vs Time ────────────────────────────────────────────────
+ax_rs_It.plot(rs_time, rs_current, color='darkorange', linewidth=1.0)
+ax_rs_It.set_xlabel('Time (s)',       fontsize=12, fontweight='bold')
+ax_rs_It.set_ylabel('Current (uA)',   fontsize=12, fontweight='bold')
+ax_rs_It.set_title('Rodeostat  --  Current vs Time', fontsize=13, fontweight='bold')
+ax_rs_It.grid(True, alpha=0.3)
+# Overlay the Rodeostat voltage ramp on a twin axis for context
+ax_rs_It_V = ax_rs_It.twinx()
+ax_rs_It_V.plot(rs_time, rs_voltage, color='purple', linewidth=0.8, alpha=0.6, label='Voltage')
+ax_rs_It_V.set_ylabel('Voltage (V)', fontsize=11, color='purple')
+ax_rs_It_V.tick_params(axis='y', labelcolor='purple')
+
+effective_rate = n_samples / li_time[-1] if li_time[-1] > 0 else 0
+fig.suptitle(
+    f'AC Cyclic Voltammetry  --  Synchronized Dual Red Pitaya + Rodeostat\n'
+    f'{n_samples:,} RP samples -> {n_ds:,} plotted (step={step}) @ {effective_rate:.1f} Hz  |  '
+    f'{len(rs_time):,} Rodeostat samples @ {len(rs_time)/rs_time[-1]:.1f} Hz',
+    fontsize=15, fontweight='bold')
+plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+combined_png = os.path.join(OUTPUT_DIRECTORY, f'accv_combined_{timestamp_str}.png')
+plt.savefig(combined_png, dpi=150, bbox_inches='tight')
+print(f"Saved plot: {combined_png}")
+
+# ============================================================
+# STATISTICS
+# ============================================================
+print("\n" + "=" * 60)
+print("ACCV STATISTICS")
+print("=" * 60)
+print(f"AC Magnitude (R):  {np.mean(li_R):.6f} +/- {np.std(li_R):.6f} V")
+print(f"Phase Angle:       {np.mean(li_Theta):.6f} +/- {np.std(li_Theta):.6f} {theta_unit}")
+print(f"DC Potential (RP): {np.mean(dc_V):.6f} +/- {np.std(dc_V):.6f} V")
+print(f"\nRodeostat:")
+print(f"  Voltage:  {np.mean(rs_voltage):.4f} +/- {np.std(rs_voltage):.4f} V  "
+      f"[{np.min(rs_voltage):.3f} -> {np.max(rs_voltage):.3f} V]")
+print(f"  Current:  {np.mean(rs_current):.4f} +/- {np.std(rs_current):.4f} uA")
+print(f"\nCorrelations (RP):")
+print(f"  R vs DC:     {np.corrcoef(li_R,     dc_V)[0,1]:.4f}")
+print(f"  Phase vs DC: {np.corrcoef(li_Theta, dc_V)[0,1]:.4f}")
+print("=" * 60)
+
+plt.show()
+
+# ============================================================
+# CYCLE AVERAGING ANALYSIS
+# ============================================================
+if RUN_CYCLE_AVERAGING:
+    print("\n" + "=" * 60)
+    print("LAUNCHING CYCLE AVERAGING ANALYSIS...")
+    print("=" * 60)
     try:
-        exp = ACCVExperiment()
-        exp.setup_devices(rodeostat_port)
+        cycle_avg_script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "postdataplotcreate.py")
 
-        input("\nPress Enter to start synchronized ACCV measurement...")
+        if os.path.exists(cycle_avg_script):
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("postdataplotcreate", cycle_avg_script)
+            mod  = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
 
-        t_cv, volt_cv, curr_cv, rp_data = exp.run_synchronized_test()
-        exp.save_data(t_cv, volt_cv, curr_cv, rp_data)
-        exp.plot_results(t_cv, volt_cv, curr_cv, rp_data)
+            print(f"Loading full merged CSV for cycle analysis: {merged_csv}")
+            df_full    = pd.read_csv(merged_csv)
+            dc_full    = df_full['DC_Voltage'].values
+            R_full     = df_full['R'].values
+            Theta_full = df_full['Theta'].values
+            time_full  = (df_full['Time_RP1'].values - df_full['Time_RP1'].values[0]
+                          if 'Time_RP1' in df_full.columns else None)
 
-        print("\n=== Experiment complete! ===")
+            fig_ca = mod.plot_accv_cycle_averaged(
+                dc_full, R_full, Theta_full,
+                time_s=time_full,
+                theta_unit=theta_unit,
+                timestamp_str=timestamp_str,
+                output_dir=OUTPUT_DIRECTORY,
+                csv_path=merged_csv,
+                n_samples=len(df_full),
+                n_ds=len(df_full),
+            )
+            if fig_ca is not None:
+                fig_ca.show()
 
-    except KeyboardInterrupt:
-        print("\nExperiment interrupted by user")
+        else:
+            print(f"  (postdataplotcreate.py not found at {cycle_avg_script})")
+            candidates = glob.glob(os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "*cycle*avg*.py"))
+            if not candidates:
+                candidates = glob.glob(os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "*accv*.py"))
+                candidates = [c for c in candidates
+                              if os.path.abspath(c) != os.path.abspath(__file__)]
+            if candidates:
+                cycle_avg_script = candidates[0]
+                print(f"  Found: {cycle_avg_script}")
+                subprocess.run([python_exe, cycle_avg_script, merged_csv])
+            else:
+                print("  Could not find cycle averaging script automatically.")
+                print(f"  Run manually:  python postdataplotcreate.py  {merged_csv}")
+
     except Exception as e:
-        print(f"\nError: {e}")
-        traceback.print_exc()
-    finally:
-        if exp:
-            exp.cleanup()
-        print("Cleanup complete")
+        print(f"  Cycle averaging failed: {e}")
+        print(f"  You can still run it manually:")
+        print(f"  python postdataplotcreate.py  {merged_csv}")
 
-
-if __name__ == '__main__':
-    main()
+print("\nCOMPLETE")
+print("=" * 60)
