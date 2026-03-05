@@ -200,7 +200,14 @@ plt.title(f'{MODE.upper()} Test - I-V Curve')
 plt.grid(True)
 
 plt.tight_layout()
-rodeostat_png = os.path.join(output_dir, f'{MODE.lower()}_plot_{timestamp}.png')
-plt.savefig(rodeostat_png, dpi=150, bbox_inches='tight')
+rodeostat_png1 = os.path.join(output_dir, f'{MODE.lower()}_timeseries_{timestamp}.png')
+plt.figure(1)
+plt.savefig(rodeostat_png1, dpi=150, bbox_inches='tight')
+print(f"Plot saved to {rodeostat_png1}")
+
+rodeostat_png2 = os.path.join(output_dir, f'{MODE.lower()}_ivcurve_{timestamp}.png')
+plt.figure(2)
+plt.savefig(rodeostat_png2, dpi=150, bbox_inches='tight')
+print(f"Plot saved to {rodeostat_png2}")
+
 plt.close('all')
-print(f"Plot saved to {rodeostat_png}")
