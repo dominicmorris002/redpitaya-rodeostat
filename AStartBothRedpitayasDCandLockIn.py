@@ -48,8 +48,8 @@ print("=" * 60)
 
 python_exe = sys.executable
 
-lockin_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lockin_with_timestamp.py")
-dc_script     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dc_monitor_with_timestamp.py")
+lockin_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ALockInAmplifier.py")
+dc_script     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ADCMonitorWithACBiasRemover.py")
 
 if not os.path.exists(lockin_script):
     print(f"Error: {lockin_script} not found!")
