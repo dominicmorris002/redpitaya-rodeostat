@@ -460,10 +460,32 @@ if RUN_CYCLE_AVERAGING:
                 n_ds=len(df_full),
             )
             if fig_ca is not None:
-                ca_png = os.path.join(OUTPUT_DIRECTORY, f'accv_cycle_avg_{timestamp_str}.png')
-                fig_ca.savefig(ca_png, dpi=150, bbox_inches='tight')
-                plt.close(fig_ca)
-                print(f"Saved cycle-avg PNG: {ca_png}")
+                # postdataplotcreate may return a plotly Figure or matplotlib Figure
+                try:
+                    import plotly.graph_objects as _pgo
+                    if isinstance(fig_ca, _pgo.Figure):
+                        # plotly figure -- save as HTML and PNG via kaleido if available
+                        ca_html2 = os.path.join(OUTPUT_DIRECTORY, f'accv_cycle_avg_{timestamp_str}.html')
+                        fig_ca.write_html(ca_html2)
+                        print(f"Saved cycle-avg HTML: {ca_html2}")
+                        try:
+                            ca_png = os.path.join(OUTPUT_DIRECTORY, f'accv_cycle_avg_{timestamp_str}.png')
+                            fig_ca.write_image(ca_png, scale=2)
+                            print(f"Saved cycle-avg PNG: {ca_png}")
+                        except Exception:
+                            pass  # kaleido not installed -- HTML only
+                    else:
+                        # matplotlib figure
+                        ca_png = os.path.join(OUTPUT_DIRECTORY, f'accv_cycle_avg_{timestamp_str}.png')
+                        fig_ca.savefig(ca_png, dpi=150, bbox_inches='tight')
+                        plt.close(fig_ca)
+                        print(f"Saved cycle-avg PNG: {ca_png}")
+                except ImportError:
+                    # plotly not available -- must be matplotlib
+                    ca_png = os.path.join(OUTPUT_DIRECTORY, f'accv_cycle_avg_{timestamp_str}.png')
+                    fig_ca.savefig(ca_png, dpi=150, bbox_inches='tight')
+                    plt.close(fig_ca)
+                    print(f"Saved cycle-avg PNG: {ca_png}")
 
             # Open the cycle-averaged HTML in browser (it's saved by postdataplotcreate)
             import webbrowser, glob as _glob
