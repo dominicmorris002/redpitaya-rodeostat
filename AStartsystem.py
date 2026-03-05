@@ -328,6 +328,10 @@ try:
     fig_html.write_html(combined_html)
     print(f"Saved HTML: {combined_html}")
 
+    # Open in default browser
+    import webbrowser
+    webbrowser.open(f'file:///{os.path.abspath(combined_html)}')
+
 except ImportError:
     print("Note: plotly not installed -- skipping HTML  (pip install plotly)")
 
