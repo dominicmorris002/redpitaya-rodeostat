@@ -9,6 +9,9 @@ to fire the measurement start to both at the same instant.
 Have a Great Day :)
 
 Dominic Morris
+
+
+If R and Theta are inversed try running 10 Hz and then run 500Hz to see if data inverts again
 """
 
 import subprocess
