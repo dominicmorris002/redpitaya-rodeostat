@@ -26,12 +26,12 @@ REF_FREQUENCY = 500   # Hz
 REF_AMPLITUDE = 0.2   # V
 OUTPUT_CHANNEL = 'out1'
 PHASE_OFFSET = 0      # degrees
-MEASUREMENT_TIME = 12 # seconds
+MEASUREMENT_TIME = 15 # seconds
 
 # INPUT MODE: 'AUTO',
 # 'LV', 'HV', or 'MANUAL'
 INPUT_MODE = 'MANUAL'
-AUTOLAB_GAIN = 1  # e.g. Based on AUTOLAB Device Scale of TIA, 1mA scale -> 1e-3
+AUTOLAB_GAIN = 2.569  # e.g. Based on AUTOLAB Device Scale of TIA, 1mA scale -> 1e-3
 MANUAL_GAIN_FACTOR = 1 * AUTOLAB_GAIN  #2.569
 MANUAL_DC_OFFSET = 0
 
@@ -39,7 +39,7 @@ MANUAL_DC_OFFSET = 0
 #   10 Hz  -> tau = 16 ms This is Best
 #   100 Hz -> tau = 1.6 ms
 #   500 Hz -> tau = 0.3 ms
-FILTER_BANDWIDTH = 10  # Hz
+FILTER_BANDWIDTH = 6  # Hz
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── DECIMATION ────────────────────────────────────────────────────────────────
