@@ -1,0 +1,379 @@
+"""
+ACCV Comparison: Signal Recovery (raw) vs Red Pitaya (cycle-averaged)
+
+SR data is NEVER modified — plotted exactly as loaded.
+RP gets full cycle-averaging treatment (up/down split, bin-avg, cycle-avg + sigma).
+
+Layout: 2 columns x 3 rows
+  Col 1: R plots
+  Col 2: Theta plots
+
+Row 1: vs Time          — SR raw line  +  RP raw line (auto-scaled)
+Row 2: vs DC (scatter)  — SR raw scatter  +  RP bin-averaged scatter (up/down)
+Row 3: vs DC (averaged) — SR raw scatter  +  RP cycle-averaged line  +/-1 sigma
+
+SR files: signal.csv, phase.csv, time.csv, dcRamp.csv
+RP file:  combined_results_*.csv
+"""
+
+import os
+import glob
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks, savgol_filter, butter, filtfilt
+from scipy.ndimage import uniform_filter1d
+
+# ============================================================
+# FILE PATHS
+# ============================================================
+SR_FOLDER = r"C:\Users\Owner\Downloads\New folder\New folder\LIC EA 5uM 1vps"
+RP_CSV    = r"C:\Users\Owner\Downloads\combined_results_20260223_182526 (1).csv"
+
+# ============================================================
+# PARAMETERS
+# ============================================================
+RP_MAX_POINTS    = 50_000   # downsample RP only
+N_GRID_POINTS    = 500      # DC voltage grid resolution for cycle averaging
+SMOOTH_WINDOW    = 51       # Savitzky-Golay window for cycle-avg line
+RAW_DS           = 5        # downsample factor for scatter plots
+DC_FILTER_ORDER  = 3        # Butterworth filter for DC ramp direction detection
+DC_FILTER_CUTOFF = 0.015
+MIN_PTS          = 3        # minimum points per bin to include
+
+# Colours
+SR_C  = 'steelblue'
+UP_C  = '#1565C0'
+DN_C  = '#B71C1C'
+
+# ============================================================
+# HELPERS — SR loader (no modification)
+# ============================================================
+
+def load_sr_csv(folder, filename):
+    path = os.path.join(folder, filename)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Not found: {path}")
+    values = []
+    with open(path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            for v in line.split(','):
+                v = v.strip()
+                if v:
+                    try:
+                        values.append(float(v))
+                    except ValueError:
+                        pass
+    return np.array(values)
+
+
+def find_col(df, candidates):
+    for c in candidates:
+        if c in df.columns:
+            return c
+    raise KeyError(f"None of {candidates} found in: {list(df.columns)}")
+
+
+# ============================================================
+# HELPERS — RP cycle averaging (from postdataplotcreate.py)
+# ============================================================
+
+def detect_triangle_cycles(dc_v, min_prominence_frac=0.3):
+    sig_range  = np.max(dc_v) - np.min(dc_v)
+    prominence = min_prominence_frac * sig_range
+    min_dist   = max(1, len(dc_v) // 100)
+    peaks,   _ = find_peaks( dc_v, prominence=prominence, distance=min_dist)
+    troughs, _ = find_peaks(-dc_v, prominence=prominence, distance=min_dist)
+    return peaks, troughs
+
+
+def build_cycle_triples(peaks, troughs, dc_v):
+    n = len(dc_v)
+
+    def snap(indices, neighbours, mode):
+        out = []
+        for idx in indices:
+            left  = neighbours[neighbours < idx]
+            right = neighbours[neighbours > idx]
+            lo = (int(left[-1])  + idx) // 2 if len(left)  else max(0,   idx - 50)
+            hi = (idx + int(right[0])) // 2  if len(right) else min(n-1, idx + 50)
+            lo, hi = max(0, lo), min(n-1, hi)
+            seg = dc_v[lo:hi+1]
+            out.append(lo + int(np.argmin(seg) if mode == 'min' else np.argmax(seg)))
+        return np.array(out, dtype=int)
+
+    s_troughs = snap(troughs, peaks,     'min')
+    s_peaks   = snap(peaks,   s_troughs, 'max')
+    cycles = []
+    for pk in s_peaks:
+        lt = s_troughs[s_troughs < pk]
+        rt = s_troughs[s_troughs > pk]
+        if len(lt) and len(rt):
+            cycles.append((int(lt[-1]), int(pk), int(rt[0])))
+    return cycles
+
+
+def interp_half(dc_h, sig_h, v_grid):
+    if len(dc_h) < 3:
+        return None
+    order = np.argsort(dc_h)
+    dc_s, sig_s = dc_h[order], sig_h[order]
+    _, keep = np.unique(dc_s, return_index=True)
+    dc_s, sig_s = dc_s[keep], sig_s[keep]
+    if len(dc_s) < 3:
+        return None
+    mask = (v_grid >= dc_s[0]) & (v_grid <= dc_s[-1])
+    if mask.sum() < 3:
+        return None
+    result = np.full(len(v_grid), np.nan)
+    result[mask] = np.interp(v_grid[mask], dc_s, sig_s)
+    return result
+
+
+def cycle_average_line(dc_v, signal, cycles, v_grid, sweep='up'):
+    traces = []
+    for t0, pk, t1 in cycles:
+        dc_h  = dc_v[t0:pk+1]   if sweep == 'up' else dc_v[pk:t1+1]
+        sig_h = signal[t0:pk+1] if sweep == 'up' else signal[pk:t1+1]
+        tr = interp_half(dc_h, sig_h, v_grid)
+        if tr is not None:
+            traces.append(tr)
+    if not traces:
+        return np.full(len(v_grid), np.nan), np.full(len(v_grid), np.nan)
+    stack = np.vstack(traces)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        all_nan  = np.all(np.isnan(stack), axis=0)
+        mean_tr  = np.where(all_nan, np.nan, np.nanmean(stack, axis=0))
+        std_tr   = np.where(all_nan, np.nan, np.nanstd(stack,  axis=0))
+    valid = ~np.isnan(mean_tr)
+    if SMOOTH_WINDOW and valid.sum() > SMOOTH_WINDOW:
+        smoothed = mean_tr.copy()
+        smoothed[valid] = savgol_filter(mean_tr[valid],
+                                        window_length=SMOOTH_WINDOW, polyorder=3)
+        mean_tr = smoothed
+    return mean_tr, std_tr
+
+
+def filter_dc_ramp(dc_v):
+    b, a = butter(DC_FILTER_ORDER, DC_FILTER_CUTOFF, btype='low')
+    padlen = max(300, len(dc_v) // 10)
+    return filtfilt(b, a, dc_v.astype(float), padlen=padlen)
+
+
+def split_sweeps(dc_filtered):
+    derV      = np.diff(dc_filtered)
+    up_mask   = np.zeros(len(dc_filtered), dtype=bool)
+    down_mask = np.zeros(len(dc_filtered), dtype=bool)
+    up_mask[:-1]   = derV > 0
+    down_mask[:-1] = derV <= 0
+    up_mask[-1]    = up_mask[-2]
+    down_mask[-1]  = down_mask[-2]
+    return up_mask, down_mask
+
+
+def bin_average(dc_pts, sig_pts, v_grid):
+    bin_edges = np.linspace(v_grid[0], v_grid[-1], len(v_grid) + 1)
+    bin_idx   = np.clip(np.digitize(dc_pts, bin_edges) - 1, 0, len(v_grid) - 1)
+    means = np.full(len(v_grid), np.nan)
+    for b in range(len(v_grid)):
+        pts = sig_pts[bin_idx == b]
+        if len(pts) >= MIN_PTS:
+            means[b] = np.mean(pts)
+    valid = ~np.isnan(means)
+    return v_grid[valid], means[valid]
+
+
+# ============================================================
+# LOAD SR  (raw, untouched)
+# ============================================================
+print("=" * 60)
+print("Loading Signal Recovery (raw)...")
+print("=" * 60)
+
+sr_R    = load_sr_csv(SR_FOLDER, "signal.csv")
+sr_Th   = load_sr_csv(SR_FOLDER, "phase.csv")
+sr_time = load_sr_csv(SR_FOLDER, "time.csv")
+sr_DC   = load_sr_csv(SR_FOLDER, "dcRamp.csv")
+
+sr_n = min(len(sr_R), len(sr_Th), len(sr_time), len(sr_DC))
+sr_R    = sr_R[:sr_n]
+sr_Th   = sr_Th[:sr_n]
+sr_time = sr_time[:sr_n] - sr_time[0]
+sr_DC   = sr_DC[:sr_n]
+
+print(f"SR: {sr_n:,} pts  |  time {sr_time[-1]:.2f}s")
+print(f"  R:     {sr_R.min():.6f} – {sr_R.max():.6f} V  (mean {sr_R.mean():.6f})")
+print(f"  Theta: {sr_Th.min():.2f} – {sr_Th.max():.2f} deg")
+print(f"  DC:    {sr_DC.min():.4f} – {sr_DC.max():.4f} V")
+
+# ============================================================
+# LOAD RED PITAYA
+# ============================================================
+print("\n" + "=" * 60)
+print("Loading Red Pitaya...")
+print("=" * 60)
+
+if os.path.isdir(RP_CSV):
+    candidates = glob.glob(os.path.join(RP_CSV, 'combined_results_*.csv'))
+    RP_CSV = max(candidates, key=os.path.getctime)
+
+gain = 1.0
+with open(RP_CSV, 'r', encoding='latin-1') as f:
+    for line in f:
+        if line.lower().startswith("# gain"):
+            try:
+                gain = float(line.split(":")[1].strip().split()[0])
+            except Exception:
+                pass
+            break
+
+rp_df    = pd.read_csv(RP_CSV, comment='#', encoding='latin-1')
+col_time = find_col(rp_df, ['Time_RP1', 'Time(s)', 'Time'])
+col_R    = find_col(rp_df, ['R', 'R(V)'])
+col_Th   = find_col(rp_df, ['Theta', 'Theta(deg)', 'Theta(\xb0)', 'Theta(rad)'])
+col_DC   = find_col(rp_df, ['DC_Voltage', 'Voltage(V)'])
+
+rp_time_raw = rp_df[col_time].values.astype(float)
+rp_R_raw    = rp_df[col_R].values.astype(float) * gain
+rp_Th_raw   = rp_df[col_Th].values.astype(float)
+rp_DC_raw   = rp_df[col_DC].values.astype(float)
+rp_time_raw = rp_time_raw - rp_time_raw[0]
+
+# Downsample RP only
+n = len(rp_time_raw)
+if n > RP_MAX_POINTS:
+    step = n // RP_MAX_POINTS
+    rp_time = rp_time_raw[::step]
+    rp_R    = rp_R_raw[::step]
+    rp_Th   = rp_Th_raw[::step]
+    rp_DC   = rp_DC_raw[::step]
+    print(f"Downsampled: {n:,} -> {len(rp_time):,} pts (step={step})")
+else:
+    rp_time, rp_R, rp_Th, rp_DC = rp_time_raw, rp_R_raw, rp_Th_raw, rp_DC_raw
+    step = 1
+
+print(f"RP: {len(rp_time):,} pts  |  time {rp_time[-1]:.2f}s")
+print(f"  R:     {rp_R.min():.6f} – {rp_R.max():.6f} V  (mean {rp_R.mean():.6f})")
+print(f"  Theta: {rp_Th.min():.2f} – {rp_Th.max():.2f} deg")
+print(f"  DC:    {rp_DC.min():.4f} – {rp_DC.max():.4f} V")
+
+# Auto-gain scale RP R to match SR
+auto_scale = np.median(sr_R) / np.median(rp_R) if np.median(rp_R) != 0 else 1.0
+rp_R       = rp_R * auto_scale
+print(f"\nAuto-gain applied to RP R: x{auto_scale:.2f}")
+
+# ============================================================
+# RP CYCLE AVERAGING
+# ============================================================
+print("\nRunning RP cycle averaging...")
+v_grid = np.linspace(rp_DC.min(), rp_DC.max(), N_GRID_POINTS)
+
+peaks, troughs = detect_triangle_cycles(rp_DC)
+cycles         = build_cycle_triples(peaks, troughs, rp_DC)
+print(f"  Detected {len(peaks)} peaks, {len(troughs)} troughs -> {len(cycles)} cycles")
+
+R_up_mn,  R_up_sd  = cycle_average_line(rp_DC, rp_R,  cycles, v_grid, 'up')
+R_dn_mn,  R_dn_sd  = cycle_average_line(rp_DC, rp_R,  cycles, v_grid, 'down')
+T_up_mn,  T_up_sd  = cycle_average_line(rp_DC, rp_Th, cycles, v_grid, 'up')
+T_dn_mn,  T_dn_sd  = cycle_average_line(rp_DC, rp_Th, cycles, v_grid, 'down')
+
+dc_filt            = filter_dc_ramp(rp_DC)
+up_mask, down_mask = split_sweeps(dc_filt)
+print(f"  Up pts: {up_mask.sum():,}   Down pts: {down_mask.sum():,}")
+
+v_Rs_up, Rs_up = bin_average(rp_DC[up_mask],   rp_R[up_mask],   v_grid)
+v_Rs_dn, Rs_dn = bin_average(rp_DC[down_mask], rp_R[down_mask], v_grid)
+v_Ts_up, Ts_up = bin_average(rp_DC[up_mask],   rp_Th[up_mask],  v_grid)
+v_Ts_dn, Ts_dn = bin_average(rp_DC[down_mask], rp_Th[down_mask],v_grid)
+
+# ============================================================
+# PLOT — 2 cols x 3 rows
+# ============================================================
+fig, axes = plt.subplots(3, 2, figsize=(16, 18))
+fig.suptitle(
+    f'ACCV Comparison: Signal Recovery (raw) vs Red Pitaya (cycle-averaged)\n'
+    f'SR: {sr_n:,} pts  |  RP: {len(rp_time):,} pts  |  '
+    f'RP cycles: {len(cycles)}  |  RP auto-scale: x{auto_scale:.2f}',
+    fontsize=13, fontweight='bold')
+
+ds = RAW_DS  # scatter downsample
+
+# ---- Row 1: vs Time ----
+ax = axes[0, 0]
+ax.plot(sr_time, sr_R, color=SR_C, linewidth=1.2, alpha=0.85, label='Signal Recovery (raw)')
+ax.plot(rp_time, rp_R, color='firebrick', linewidth=1.0, alpha=0.65, label=f'Red Pitaya (x{auto_scale:.1f})')
+ax.set_xlabel('Time (s)', fontsize=11)
+ax.set_ylabel('AC Magnitude R (V)', fontsize=11)
+ax.set_title('R vs Time', fontsize=12, fontweight='bold')
+ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
+
+ax = axes[0, 1]
+ax.plot(sr_time, sr_Th, color=SR_C, linewidth=1.2, alpha=0.85, label='Signal Recovery (raw)')
+ax.plot(rp_time, rp_Th, color='firebrick', linewidth=1.0, alpha=0.65, label='Red Pitaya')
+ax.set_xlabel('Time (s)', fontsize=11)
+ax.set_ylabel('Phase Angle (deg)', fontsize=11)
+ax.set_title('Theta vs Time', fontsize=12, fontweight='bold')
+ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
+
+# ---- Row 2: vs DC scatter (SR raw + RP bin-averaged) ----
+ax = axes[1, 0]
+ax.scatter(sr_DC[::ds], sr_R[::ds],
+           s=4, alpha=0.5, color=SR_C, label='SR (raw)')
+ax.scatter(v_Rs_up, Rs_up, s=18, alpha=0.85, color=UP_C, label='RP forward (bin avg)')
+ax.scatter(v_Rs_dn, Rs_dn, s=18, alpha=0.85, color=DN_C, label='RP reverse (bin avg)')
+ax.set_xlabel('DC Potential (V)', fontsize=11)
+ax.set_ylabel('AC Magnitude R (V)', fontsize=11)
+ax.set_title('R vs DC  —  Scatter + RP Bin-Averaged', fontsize=12, fontweight='bold')
+ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
+
+ax = axes[1, 1]
+ax.scatter(sr_DC[::ds], sr_Th[::ds],
+           s=4, alpha=0.5, color=SR_C, label='SR (raw)')
+ax.scatter(v_Ts_up, Ts_up, s=18, alpha=0.85, color=UP_C, label='RP forward (bin avg)')
+ax.scatter(v_Ts_dn, Ts_dn, s=18, alpha=0.85, color=DN_C, label='RP reverse (bin avg)')
+ax.set_xlabel('DC Potential (V)', fontsize=11)
+ax.set_ylabel('Phase Angle (deg)', fontsize=11)
+ax.set_title('Theta vs DC  —  Scatter + RP Bin-Averaged', fontsize=12, fontweight='bold')
+ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
+
+# ---- Row 3: vs DC averaged lines (SR raw scatter + RP cycle-avg ±1σ) ----
+ax = axes[2, 0]
+ax.scatter(sr_DC[::ds], sr_R[::ds],
+           s=4, alpha=0.4, color=SR_C, label='SR (raw)')
+for mn, sd, c, lbl in [(R_up_mn, R_up_sd, UP_C, 'RP forward (cycle avg)'),
+                        (R_dn_mn, R_dn_sd, DN_C, 'RP reverse (cycle avg)')]:
+    msk = ~np.isnan(mn)
+    ax.fill_between(v_grid[msk], (mn-sd)[msk], (mn+sd)[msk],
+                    color=c, alpha=0.18)
+    ax.plot(v_grid[msk], mn[msk], color=c, linewidth=2.2, label=lbl)
+ax.set_xlabel('DC Potential (V)', fontsize=11)
+ax.set_ylabel('AC Magnitude R (V)', fontsize=11)
+ax.set_title('R vs DC  —  SR raw + RP Cycle-Averaged ±1σ', fontsize=12, fontweight='bold')
+ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
+
+ax = axes[2, 1]
+ax.scatter(sr_DC[::ds], sr_Th[::ds],
+           s=4, alpha=0.4, color=SR_C, label='SR (raw)')
+for mn, sd, c, lbl in [(T_up_mn, T_up_sd, UP_C, 'RP forward (cycle avg)'),
+                        (T_dn_mn, T_dn_sd, DN_C, 'RP reverse (cycle avg)')]:
+    msk = ~np.isnan(mn)
+    ax.fill_between(v_grid[msk], (mn-sd)[msk], (mn+sd)[msk],
+                    color=c, alpha=0.18)
+    ax.plot(v_grid[msk], mn[msk], color=c, linewidth=2.2, label=lbl)
+ax.set_xlabel('DC Potential (V)', fontsize=11)
+ax.set_ylabel('Phase Angle (deg)', fontsize=11)
+ax.set_title('Theta vs DC  —  SR raw + RP Cycle-Averaged ±1σ', fontsize=12, fontweight='bold')
+ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
+
+plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+out = os.path.join(os.path.dirname(os.path.abspath(RP_CSV)), 'accv_sr_vs_rp_comparison.png')
+plt.savefig(out, dpi=150, bbox_inches='tight')
+print(f"\nSaved: {out}")
+plt.show()
+print("Done.")
