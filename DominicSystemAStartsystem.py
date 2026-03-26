@@ -43,9 +43,9 @@ print("=" * 60)
 
 python_exe = sys.executable
 
-lockin_script    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ALockInAmplifier.py")
-dc_script        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ADCMonitorWithACBiasRemover.py")
-rodeostat_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ARodeostat.py")
+lockin_script    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DominicSystemALockInAmplifier.py")
+dc_script        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DominicSystemADCMonitorWithACBiasRemover.py")
+rodeostat_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DominicSystemARodeostat.py")
 
 for label, path in [("Lock-in script",  lockin_script),
                     ("DC script",        dc_script),
@@ -403,11 +403,11 @@ if Run_Cycle_Averaging:
     try:
         cycle_avg_script = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            "postdataplotcreate.py")
+            "DominicSystempostdataplotcreate.py")
 
         if os.path.exists(cycle_avg_script):
             import importlib.util
-            spec = importlib.util.spec_from_file_location("postdataplotcreate", cycle_avg_script)
+            spec = importlib.util.spec_from_file_location("DominicSystempostdataplotcreate", cycle_avg_script)
             mod  = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
 
