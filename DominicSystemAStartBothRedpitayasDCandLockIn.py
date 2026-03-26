@@ -263,7 +263,7 @@ if Run_Cycle_Averaging:
     try:
         Cycle_Avg_Script = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            "postdataplotcreate.py")
+            "DominicSystempostdataplotcreate.py")
 
         if os.path.exists(Cycle_Avg_Script):
             import importlib.util
