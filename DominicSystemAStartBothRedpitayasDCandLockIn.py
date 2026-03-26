@@ -267,7 +267,7 @@ if Run_Cycle_Averaging:
 
         if os.path.exists(Cycle_Avg_Script):
             import importlib.util
-            Spec = importlib.util.spec_from_file_location("postdataplotcreate", Cycle_Avg_Script)
+            Spec = importlib.util.spec_from_file_location("DominicSystempostdataplotcreate", Cycle_Avg_Script)
             Mod  = importlib.util.module_from_spec(Spec)
             Spec.loader.exec_module(Mod)
 
