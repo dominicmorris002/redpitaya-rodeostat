@@ -41,8 +41,8 @@ print("=" * 60)
 
 Python_Exe = sys.executable
 
-Lockin_Script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ALockInAmplifier.py")
-Dc_Script     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ADCMonitorWithACBiasRemover.py")
+Lockin_Script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DominicSystemALockInAmplifier.py")
+Dc_Script     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "DominicSystemADCMonitorWithACBiasRemover.py")
 
 if not os.path.exists(Lockin_Script):
     print(f"Error: {Lockin_Script} not found!")
