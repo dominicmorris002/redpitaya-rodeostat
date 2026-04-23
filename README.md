@@ -156,5 +156,13 @@ zipp==3.20.2
 
 
 
+
+ACDC Bias Circuit 
+
+<img width="1205" height="402" alt="image" src="https://github.com/user-attachments/assets/cfe08860-afed-464b-ade4-d92f14ca3bf2" />
+
+
+
+
 Have a great day!   
 — Dominic Morris :)
