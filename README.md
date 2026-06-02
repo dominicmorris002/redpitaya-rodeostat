@@ -154,7 +154,143 @@ webencodings==0.5.1
 wheel==0.45.1
 zipp==3.20.2
 
+## First-Time Setup (Windows)
 
+### 1. Install Python 3.8
+
+This project was developed and tested with **Python 3.8**.
+
+Download and install Python 3.8:
+
+https://www.python.org/downloads/release/python-3810/
+
+During installation, make sure to check:
+
+- [x] Add Python to PATH
+
+---
+
+### 2. Clone the Repository
+
+```powershell
+git clone https://github.com/dominicmorris002/redpitaya-rodeostat.git
+cd redpitaya-rodeostat
+```
+
+---
+
+### 3. Create a Virtual Environment
+
+```powershell
+py -3.8 -m venv .venv
+```
+
+Activate the environment:
+
+```powershell
+.\.venv\Scripts\activate
+```
+
+Verify:
+
+```powershell
+python --version
+```
+
+Expected output:
+
+```text
+Python 3.8.x
+```
+
+---
+
+### 4. Upgrade Packaging Tools
+
+```powershell
+python -m pip install --upgrade pip setuptools wheel
+```
+
+---
+
+### 5. Install Project Dependencies
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+---
+
+### 6. Verify Installation
+
+```powershell
+python --version
+pip list
+```
+
+---
+
+## PyCharm Setup
+
+1. Open the project in PyCharm.
+2. Go to:
+
+   ```
+   File → Settings → Project → Python Interpreter
+   ```
+
+3. Click:
+
+   ```
+   Add Interpreter
+   ```
+
+4. Select:
+
+   ```
+   Existing Environment
+   ```
+
+5. Browse to:
+
+   ```
+   .venv\Scripts\python.exe
+   ```
+
+6. Click OK.
+
+---
+
+## Troubleshooting
+
+### Wrong Python Version
+
+If you see errors while installing packages, verify that the virtual environment is using Python 3.8:
+
+```powershell
+python --version
+```
+
+Expected:
+
+```text
+Python 3.8.x
+```
+
+If you accidentally created the environment with a newer Python version:
+
+```powershell
+deactivate
+Remove-Item -Recurse -Force .venv
+py -3.8 -m venv .venv
+.\.venv\Scripts\activate
+```
+
+Then reinstall:
+
+```powershell
+python -m pip install -r requirements.txt
+```
 
 
 
