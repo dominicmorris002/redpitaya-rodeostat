@@ -114,7 +114,7 @@ EDITOR_JS = r"""
     After shifting DC to align cycles, press this to recalculate
     which points are forward (blue) vs reverse (red) sweeps.
   </p>
-  <button class="accv-btn orange" onclick="accvRecalcSweeps()">
+  <button class="accv-btn orange" onclick="accvRecalcSweeps(false)">
     &#8635; Recalculate Forward / Reverse Sweeps
   </button>
   <div id="accv-sweep-info" style="font-size:11px;color:#555;margin-top:4px;"></div>
@@ -170,10 +170,14 @@ let rawDC_V_full = null;
 
 let currentUpMask = null;
 let currentDownMask = null;
+let _lastMaskShift = null;
+let _dcRange = 1;
+let _dcFiltered = null;
+let _dragSig = null;
+let _forceRecalc = false;
 let gd = null;
 let _isDragging = false;
 let _rafId = null;
-let _forceRecalc = false;
 
 function getPlotlyDiv() {
   if (gd && gd.data) return gd;
@@ -261,9 +265,14 @@ function extractRaw() {
   }
 
   if (rawDC_V_full) {
-    const m = computeMasksFromDC(N, 0);
-    currentUpMask = m.upMask;
-    currentDownMask = m.downMask;
+    let vmin = rawDC_V_full[0], vmax = rawDC_V_full[0];
+    for (let i = 1; i < rawDC_V_full.length; i++) {
+      if (rawDC_V_full[i] < vmin) vmin = rawDC_V_full[i];
+      if (rawDC_V_full[i] > vmax) vmax = rawDC_V_full[i];
+    }
+    _dcRange = Math.max(vmax - vmin, 1e-6);
+    _dcFiltered = movingAverageDC(rawDC_V_full, Math.max(3, Math.round(rawDC_V_full.length / 200)));
+    syncMasksToDcShift(0, true);
   }
 
   // Update crop slider maxima
@@ -276,21 +285,30 @@ function extractRaw() {
   console.log('accv: extracted', rawData.length, 'traces, N =', N);
 }
 
+function movingAverageDC(src, halfWin) {
+  const n = src.length, out = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    let s = 0, c = 0;
+    const lo = Math.max(0, i - halfWin), hi = Math.min(n - 1, i + halfWin);
+    for (let j = lo; j <= hi; j++) { s += src[j]; c++; }
+    out[i] = s / c;
+  }
+  return out;
+}
+
 function computeMasksFromDC(N, dcShift) {
   const up = new Uint8Array(N);
   const down = new Uint8Array(N);
-  const win = Math.max(1, Math.round(N / 500));
-  const sm = new Float64Array(N);
-  for (let i = 0; i < N; i++) {
-    let s = 0, c = 0;
-    for (let j = Math.max(0, i - win); j <= Math.min(N - 1, i + win); j++) {
-      const src = j - dcShift;
-      if (src >= 0 && src < rawDC_V_full.length) { s += rawDC_V_full[src]; c++; }
-    }
-    sm[i] = c ? s / c : 0;
-  }
+  const srcArr = _dcFiltered || rawDC_V_full;
+  const len = srcArr.length;
   for (let i = 0; i < N - 1; i++) {
-    if (sm[i + 1] > sm[i]) up[i] = 1;
+    const a = i - dcShift, b = i + 1 - dcShift;
+    if (a < 0 || b < 0 || a >= len || b >= len) {
+      if (i > 0) { up[i] = up[i - 1]; down[i] = down[i - 1]; }
+      else { up[i] = 1; }
+      continue;
+    }
+    if (srcArr[b] > srcArr[a]) up[i] = 1;
     else down[i] = 1;
   }
   up[N - 1] = N > 1 ? up[N - 2] : 0;
@@ -298,18 +316,159 @@ function computeMasksFromDC(N, dcShift) {
   return { upMask: up, downMask: down };
 }
 
-window.accvRecalcSweeps = function(skipUndo) {
-  if (!rawData || !rawDC_V_full) { alert('No data loaded yet'); return; }
-  if (!skipUndo) pushUndo();
-  const dcShift = state.shift['DC'] | 0;
+function syncMasksToDcShift(forceShift, force) {
+  if (!rawData || !rawDC_V_full) return;
+  const dcShift = (forceShift !== undefined) ? (forceShift | 0) : (state.shift['DC'] | 0);
+  if (!force && !_forceRecalc && _lastMaskShift === dcShift && currentUpMask) return;
   const m = computeMasksFromDC(rawData._N, dcShift);
   currentUpMask = m.upMask;
   currentDownMask = m.downMask;
-  const upCount = Array.from(m.upMask).reduce((s, v) => s + v, 0);
-  const downCount = Array.from(m.downMask).reduce((s, v) => s + v, 0);
-  document.getElementById('accv-sweep-info').textContent =
-    'Forward: ' + upCount.toLocaleString() + ' pts  |  Reverse: ' + downCount.toLocaleString() + ' pts';
+  _lastMaskShift = dcShift;
+}
+
+function isPristine() {
+  if (state.cropL || state.cropR || state.removed.size) return false;
+  for (const s of SIGNALS) {
+    if (state.shift[s] !== 0 || state.gain[s] !== 1) return false;
+    if (state.clipLo[s] !== null || state.clipHi[s] !== null) return false;
+  }
+  return true;
+}
+
+function getDcV(i, dcShift) {
+  const dcSrc = i - dcShift;
+  if (dcSrc < 0 || dcSrc >= rawDC_V_full.length) return NaN;
+  return rawDC_V_full[dcSrc];
+}
+
+function collectDcPts(sig, dir, sh, g, lo, hi, L, end, N, dcShift, step) {
+  const sigY = rawTimeSeries[sig].y;
+  const mask = (dir === 'up') ? currentUpMask : currentDownMask;
+  const dcX = [], sigVals = [];
+  for (let i = L; i < Math.min(end, N); i += step) {
+    if (!mask[i] || state.removed.has(i)) continue;
+    const src = i - sh;
+    if (src < 0 || src >= sigY.length) continue;
+    const ry = sigY[src];
+    if (ry === undefined || isNaN(ry)) continue;
+    const dcV = getDcV(i, dcShift);
+    if (isNaN(dcV)) continue;
+    let yv = ry * g;
+    if ((lo !== null && yv < lo) || (hi !== null && yv > hi)) continue;
+    dcX.push(dcV); sigVals.push(yv);
+  }
+  return { dcX, sigVals };
+}
+
+function interpSegToGrid(dc, sig, nGrid) {
+  const n = dc.length;
+  if (n < 2) return { x: [], y: [] };
+  const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => dc[a] - dc[b]);
+  const dcs = [], sigs = [];
+  for (const i of order) {
+    if (dcs.length && Math.abs(dc[i] - dcs[dcs.length - 1]) < 1e-9) continue;
+    dcs.push(dc[i]); sigs.push(sig[i]);
+  }
+  if (dcs.length < 2) return { x: [], y: [] };
+  const vLo = dcs[0], vHi = dcs[dcs.length - 1];
+  const x = [], y = [];
+  const ng = Math.max(2, nGrid);
+  for (let gi = 0; gi < ng; gi++) {
+    const v = vLo + gi * (vHi - vLo) / (ng - 1);
+    let j = 0;
+    while (j < dcs.length - 1 && dcs[j + 1] < v) j++;
+    if (j >= dcs.length - 1) { x.push(v); y.push(sigs[dcs.length - 1]); continue; }
+    const t = (v - dcs[j]) / (dcs[j + 1] - dcs[j]);
+    x.push(v);
+    y.push(sigs[j] + t * (sigs[j + 1] - sigs[j]));
+  }
+  return { x, y };
+}
+
+function collectDcLine(sig, dir, sh, g, lo, hi, L, end, N, dcShift, step, gridPts) {
+  const sigY = rawTimeSeries[sig].y;
+  const mask = (dir === 'up') ? currentUpMask : currentDownMask;
+  const vBreak = Math.max(0.015, _dcRange * 0.04);
+  const segs = [];
+  let cur = { dc: [], sig: [] };
+  let prevI = -999999, prevV = NaN;
+
+  for (let i = L; i < Math.min(end, N); i += step) {
+    if (!mask[i] || state.removed.has(i)) continue;
+    const src = i - sh;
+    if (src < 0 || src >= sigY.length) continue;
+    const ry = sigY[src];
+    if (ry === undefined || isNaN(ry)) continue;
+    const dcV = getDcV(i, dcShift);
+    if (isNaN(dcV)) continue;
+    let yv = ry * g;
+    if ((lo !== null && yv < lo) || (hi !== null && yv > hi)) continue;
+
+    let breakSeg = false;
+    if (cur.dc.length) {
+      if (i - prevI > step * 4) breakSeg = true;
+      else if (dir === 'up' && dcV < prevV - vBreak) breakSeg = true;
+      else if (dir === 'down' && dcV > prevV + vBreak) breakSeg = true;
+    }
+    if (breakSeg) {
+      if (cur.dc.length >= 2) segs.push(cur);
+      cur = { dc: [], sig: [] };
+    }
+    cur.dc.push(dcV); cur.sig.push(yv);
+    prevV = dcV; prevI = i;
+  }
+  if (cur.dc.length >= 2) segs.push(cur);
+
+  const dcX = [], sigVals = [];
+  for (let s = 0; s < segs.length; s++) {
+    if (s > 0) { dcX.push(null); sigVals.push(null); }
+    const interp = interpSegToGrid(segs[s].dc, segs[s].sig, gridPts);
+    for (let k = 0; k < interp.x.length; k++) {
+      dcX.push(interp.x[k]); sigVals.push(interp.y[k]);
+    }
+  }
+  return { dcX, sigVals };
+}
+
+function traceNeedsUpdate(sig, xtype, light) {
+  if (!light || !_dragSig) return true;
+  if (xtype === 'time') {
+    if (_dragSig === 'DC') return true;
+    return sig === _dragSig || sig === 'DC';
+  }
+  return _dragSig === 'DC' || sig === _dragSig;
+}
+
+window.accvStartDrag = function(sig, el) {
+  _dragSig = sig;
+  accvPushUndoOnce(el);
+  _isDragging = true;
+};
+
+window.accvOnShiftRelease = function() {
+  _isDragging = false;
+  _dragSig = null;
+  scheduleRerender(true);
+};
+
+function updateSweepInfo() {
+  const el = document.getElementById('accv-sweep-info');
+  if (!el || !currentUpMask) return;
+  let upCount = 0, downCount = 0;
+  for (let i = 0; i < currentUpMask.length; i++) {
+    upCount += currentUpMask[i];
+    downCount += currentDownMask[i];
+  }
+  el.textContent = 'Forward: ' + upCount.toLocaleString() + ' pts  |  Reverse: ' + downCount.toLocaleString() + ' pts';
+}
+
+window.accvRecalcSweeps = function(skipUndo) {
+  if (!rawData || !rawDC_V_full) { alert('No data loaded yet'); return; }
+  if (skipUndo !== true) pushUndo();
   _forceRecalc = true;
+  _lastMaskShift = null;
+  syncMasksToDcShift(undefined, true);
+  updateSweepInfo();
   rerender(true);
   _forceRecalc = false;
   document.getElementById('accv-status').textContent = 'Sweeps recalculated \u2713';
@@ -332,9 +491,15 @@ function rerender(fullUpdate) {
   const L   = Math.max(0, Math.min(state.cropL, N - 2));
   const R   = Math.max(0, Math.min(state.cropR, N - L - 1));
   const end = N - R;
-  const dcShift = state.shift['DC'] | 0;
   const light = _isDragging || !fullUpdate;
-  const scatterStep = light ? 6 : 1;
+  const forceAll = _forceRecalc;
+
+  const dcShift = state.shift['DC'] | 0;
+  const timeStep = light ? 3 : 1;
+  const scatterStep = light ? 10 : 3;
+  const lineStep = light ? 5 : 2;
+  const lineGrid = light ? 35 : 70;
+  const linePristine = !forceAll && isPristine();
 
   const batchIdx = [];
   const batchX   = [];
@@ -345,8 +510,7 @@ function rerender(fullUpdate) {
     if ((raw.name || '').startsWith('__band__')) return;
 
     const { sig, xtype, dir, plotlyIdx } = raw;
-    if (light && xtype !== 'time') return;
-    if (xtype === 'dc_voltage_line') return;
+    if (!forceAll && !traceNeedsUpdate(sig, xtype, light)) return;
 
     const sh = state.shift[sig] | 0;
     const g  = state.gain[sig];
@@ -360,7 +524,7 @@ function rerender(fullUpdate) {
       newX = [];
       newY = [];
 
-      for (let i = L; i < Math.min(end, len); i++) {
+      for (let i = L; i < Math.min(end, len); i += timeStep) {
         const xv = raw.x[i] !== undefined ? raw.x[i] : i;
 
         if (state.removed.has(i)) {
@@ -387,41 +551,20 @@ function rerender(fullUpdate) {
         newY.push(yv);
       }
 
-    // ---- DC-VS-VOLTAGE SCATTER TRACES --------------------------------
-    // These are originally plotted as (DC_voltage[i], signal[i]).
-    // When shift is applied to a signal, we need to re-pair:
-    //   x = DC_voltage[i]          (not shifted — DC position stays)
-    //   y = signal[i - sh] * gain  (signal reads from shifted index)
-    // Crop and removed-point logic also applies.
+    } else if (xtype === 'dc_voltage_line') {
+      if (linePristine) {
+        newX = Array.from(raw.x);
+        newY = Array.from(raw.y);
+      } else {
+        if (!rawDC_V_full || !rawTimeSeries[sig] || !currentUpMask) return;
+        const pts = collectDcLine(sig, dir, sh, g, lo, hi, L, end, N, dcShift, lineStep, lineGrid);
+        newX = pts.dcX; newY = pts.sigVals;
+      }
+
     } else if (xtype === 'dc_voltage') {
       if (!rawDC_V_full || !rawTimeSeries[sig] || !currentUpMask) return;
-
-      const sigY = rawTimeSeries[sig].y;
-      const mask = (dir === 'up') ? currentUpMask : currentDownMask;
-
-      newX = [];
-      newY = [];
-
-      for (let i = L; i < Math.min(end, N); i += scatterStep) {
-        if (!mask[i]) continue;             // wrong sweep direction
-        if (state.removed.has(i)) continue; // removed point — skip entirely (scatter, no null gap needed)
-
-        const src = i - sh;
-        if (src < 0 || src >= sigY.length) continue;
-
-        const rawSigY = sigY[src];
-        if (rawSigY === undefined || isNaN(rawSigY)) continue;
-
-        const dcSrc = i - dcShift;
-        const dcV = (dcSrc >= 0 && dcSrc < rawDC_V_full.length) ? rawDC_V_full[dcSrc] : undefined;
-        if (dcV === undefined || isNaN(dcV)) continue;
-
-        let yv = rawSigY * g;
-        if ((lo !== null && yv < lo) || (hi !== null && yv > hi)) continue;
-
-        newX.push(dcV);
-        newY.push(yv);
-      }
+      const { dcX, sigVals } = collectDcPts(sig, dir, sh, g, lo, hi, L, end, N, dcShift, scatterStep);
+      newX = dcX; newY = sigVals;
 
     } else {
       return;  // unknown xtype
@@ -441,9 +584,10 @@ function rerender(fullUpdate) {
     }
   }
 
+  document.getElementById('accv-removed-count').textContent = state.removed.size;
+  if (light) return;
   document.getElementById('accv-status').textContent =
     'Updated ' + batchIdx.length + ' traces \u00b7 ' + state.removed.size + ' pts removed';
-  document.getElementById('accv-removed-count').textContent = state.removed.size;
 }
 
 // ------------------------------------------------------------
@@ -483,7 +627,10 @@ window.accvUndo = function() {
   state.cropL   = s.cropL;
   state.cropR   = s.cropR;
   state.removed = new Set(s.removed);
+  _lastMaskShift = null;
+  syncMasksToDcShift(undefined, true);
   syncUI();
+  updateSweepInfo();
   rerender(true);
   updateUndoCount();
 };
@@ -499,7 +646,10 @@ window.accvReset = function() {
   state.cropL = 0;
   state.cropR = 0;
   state.removed.clear();
+  _lastMaskShift = null;
   syncUI();
+  syncMasksToDcShift(0, true);
+  updateSweepInfo();
   rerender(true);
 };
 
@@ -615,13 +765,13 @@ function onPlotlyClick(data) {
   });
 
   document.getElementById('accv-removed-count').textContent = state.removed.size;
-  rerender();
+  rerender(true);
 }
 
 window.accvRestoreRemoved = function() {
   pushUndo();
   state.removed.clear();
-  rerender();
+  rerender(true);
 };
 
 // ------------------------------------------------------------
@@ -650,8 +800,8 @@ function buildSignalUI() {
       <div class="accv-row">
         <label>Shift (samples)</label>
         <input type="range"  id="shift-${sig}"   min="${-shiftMax}" max="${shiftMax}" step="1" value="0"
-               onpointerdown="accvPushUndoOnce(this);_isDragging=true;"
-               onpointerup="_isDragging=false;rerender(true);"
+               onpointerdown="accvStartDrag('${sig}', this)"
+               onpointerup="accvOnShiftRelease()"
                oninput="accvSetShift('${sig}', this.value)">
         <input type="number" id="shift-${sig}-n" min="${-shiftMax}" max="${shiftMax}" step="1" value="0"
                onchange="pushUndo();accvSetShift('${sig}', this.value)">
@@ -659,8 +809,8 @@ function buildSignalUI() {
       <div class="accv-row">
         <label>Gain (\u00d7)</label>
         <input type="range"  id="gain-${sig}"   min="0.01" max="10" step="0.01" value="1"
-               onpointerdown="accvPushUndoOnce(this);_isDragging=true;"
-               onpointerup="_isDragging=false;rerender(true);"
+               onpointerdown="accvStartDrag('${sig}', this)"
+               onpointerup="accvOnShiftRelease()"
                oninput="accvSetGain('${sig}', this.value)">
         <input type="number" id="gain-${sig}-n" min="0.01" max="100" step="0.001" value="1"
                onchange="accvSetGain('${sig}', this.value)">
@@ -1035,7 +1185,7 @@ def plot_accv_cycle_averaged(dc_v, li_R, li_Theta, time_s=None, theta_unit='deg'
 
     def _line(row, col, mean, color, name, showlegend=True):
         msk = ~np.isnan(mean)
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=v_grid[msk].tolist(), y=mean[msk].tolist(),
             mode='lines', line=dict(color=color, width=2.5),
             name=name, showlegend=showlegend,
