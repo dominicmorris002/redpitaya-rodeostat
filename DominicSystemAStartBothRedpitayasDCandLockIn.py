@@ -279,7 +279,7 @@ if Run_Cycle_Averaging:
             Time_Full  = (Df_Full['Time_RP1'].values - Df_Full['Time_RP1'].values[0]
                           if 'Time_RP1' in Df_Full.columns else None)
 
-            Fig_Ca = Mod.plot_accv_cycle_averaged(
+            Fig_Ca, Html_Path = Mod.plot_accv_cycle_averaged(
                 Dc_Full, R_Full, Theta_Full,
                 time_s=Time_Full,
                 theta_unit=Theta_Unit,
@@ -289,7 +289,10 @@ if Run_Cycle_Averaging:
                 n_samples=len(Df_Full),
                 n_ds=len(Df_Full),
             )
-            if Fig_Ca is not None:
+            if Html_Path and os.path.exists(Html_Path):
+                import webbrowser
+                webbrowser.open('file:///' + Html_Path.replace('\\', '/'))
+            elif Fig_Ca is not None:
                 Fig_Ca.show()
 
         else:
